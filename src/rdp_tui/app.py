@@ -5,7 +5,6 @@ from __future__ import annotations
 import curses
 import shutil
 import subprocess
-from dataclasses import fields
 
 from .profiles import Profile, command_for, load_profiles, save_profiles
 
@@ -13,18 +12,30 @@ EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio"
 
 
 def prompt(screen: curses.window, label: str, default: str = "") -> str | None:
-    curses.echo()
-    screen.clear()
-    screen.addstr(0, 0, label)
-    screen.addstr(2, 0, "> " + default)
-    screen.move(2, 2 + len(default))
-    try:
-        response = screen.getstr(2, 2, 512).decode().strip()
-    except KeyboardInterrupt:
-        response = ""
-    finally:
-        curses.noecho()
-    return response or default
+    """Read a line while handling terminal Backspace and Delete consistently."""
+    response = list(default)
+    screen.keypad(True)
+    curses.curs_set(1)
+    while True:
+        screen.erase()
+        screen.addstr(0, 0, label)
+        screen.addstr(2, 0, "> " + "".join(response))
+        screen.move(2, 2 + len(response))
+        screen.refresh()
+        key = screen.get_wch()
+        if key in ("\n", "\r", curses.KEY_ENTER):
+            curses.curs_set(0)
+            answer = "".join(response).strip()
+            return answer or default
+        if key == "\x1b":
+            curses.curs_set(0)
+            return None
+        if key in (curses.KEY_BACKSPACE, curses.KEY_DC, "\x08", "\x7f"):
+            if response:
+                response.pop()
+            continue
+        if isinstance(key, str) and key.isprintable() and len(response) < 512:
+            response.append(key)
 
 
 def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profile | None:
@@ -68,6 +79,7 @@ def draw(screen: curses.window, profiles: list[Profile], selected: int, message:
 
 
 def run(screen: curses.window) -> None:
+    screen.keypad(True)
     curses.curs_set(0)
     profiles = load_profiles()
     selected, message = 0, "Passwords are never stored; FreeRDP will request them."

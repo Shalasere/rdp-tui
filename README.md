@@ -16,10 +16,11 @@ Install FreeRDP first (for example, `sudo pacman -S freerdp` on Arch or `sudo ap
 ```sh
 git clone <your-repository-url>
 cd rdp-tui
-python -m venv .venv
-.venv/bin/pip install -e .
-rdp-tui
+./rdp-tui
 ```
+
+For an installed `rdp-tui` command instead, create a virtual environment and
+install the project with `python -m venv .venv && .venv/bin/pip install -e .`.
 
 Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect.
 
