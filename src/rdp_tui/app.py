@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import curses
-import shutil
 import subprocess
 
-from .profiles import Profile, command_for, load_profiles, save_profiles
+from .profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles
 
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
 
@@ -111,10 +110,11 @@ def run(screen: curses.window) -> None:
                 profiles.pop(selected)
                 save_profiles(profiles)
         elif key in (10, 13, curses.KEY_ENTER) and profiles:
-            if not shutil.which("xfreerdp"):
-                message = "xfreerdp is not installed or not on PATH."
+            client = freerdp_client()
+            if client is None:
+                message = "FreeRDP is not installed or not on PATH (tried xfreerdp3, xfreerdp)."
                 continue
-            command = command_for(profiles[selected])
+            command = command_for(profiles[selected], client)
             curses.endwin()
             try:
                 subprocess.run(command, check=False)

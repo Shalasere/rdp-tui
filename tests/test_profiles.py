@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import patch
 
-from rdp_tui.profiles import Profile, command_for, load_profiles, save_profiles
+from rdp_tui.profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles
 
 
 class ProfileTests(unittest.TestCase):
@@ -16,6 +17,11 @@ class ProfileTests(unittest.TestCase):
                 save_profiles([profile], path)
                 self.assertEqual(load_profiles(path), [profile])
 
-        self.assertEqual(command_for(profile), [
-            "xfreerdp", "/v:rdp.example.test", "/u:ada", "/d:EXAMPLE", "/f", "+clipboard", "/sound",
+        self.assertEqual(command_for(profile, "xfreerdp3"), [
+            "xfreerdp3", "/v:rdp.example.test", "/u:ada", "/d:EXAMPLE", "/f", "+clipboard", "/sound",
         ])
+
+    @patch("rdp_tui.profiles.shutil.which")
+    def test_prefers_freerdp3(self, which):
+        which.side_effect = lambda executable: "/usr/bin/xfreerdp3" if executable == "xfreerdp3" else None
+        self.assertEqual(freerdp_client(), "xfreerdp3")

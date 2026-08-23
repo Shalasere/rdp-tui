@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rdp-tui" / "profiles.json"
+CLIENT_CANDIDATES = ("xfreerdp3", "xfreerdp")
 
 
 @dataclass
@@ -51,8 +53,13 @@ def save_profiles(profiles: list[Profile], path: Path = CONFIG_PATH) -> None:
     temporary.replace(path)
 
 
-def command_for(profile: Profile) -> list[str]:
-    command = ["xfreerdp", f"/v:{profile.host}"]
+def freerdp_client() -> str | None:
+    """Return the installed FreeRDP X11 client, preferring FreeRDP 3."""
+    return next((client for client in CLIENT_CANDIDATES if shutil.which(client)), None)
+
+
+def command_for(profile: Profile, client: str = "xfreerdp3") -> list[str]:
+    command = [client, f"/v:{profile.host}"]
     if profile.user:
         command.append(f"/u:{profile.user}")
     if profile.domain:
