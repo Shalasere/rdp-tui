@@ -9,6 +9,7 @@ real connection problem makes a later item more urgent.
 - [x] Advanced FreeRDP settings while retaining a simple default form
 - [x] Native Wayland SDL path with input preservation and safe X11 recovery
 - [x] Physical-display sizing and optional smart sizing
+- [x] Wayland SDL as the default renderer on supported Wayland/Hyprland systems
 - [x] Persistent logging, launch results, and detailed status view
 - [x] Remmina, `.rdp`, and JSON profile import; password-free `.rdp` export
 - [x] Profile clone and search/filter

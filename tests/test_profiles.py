@@ -36,7 +36,7 @@ class ProfileTests(unittest.TestCase):
                 from pathlib import Path
 
                 path = Path(directory) / "profiles.json"
-                profile = Profile("Work", "rdp.example.test", user="ada", domain="EXAMPLE", audio=True)
+                profile = Profile("Work", "rdp.example.test", user="ada", domain="EXAMPLE", audio=True, renderer="x11")
                 save_profiles([profile], path)
                 self.assertEqual(load_profiles(path), [profile])
 

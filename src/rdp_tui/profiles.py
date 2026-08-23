@@ -48,7 +48,7 @@ class Profile:
     network_type: str = "auto"
     color_depth: int = 0
     certificate_policy: str = "default"
-    renderer: str = "x11"
+    renderer: str = "wayland_sdl"
     admin_session: bool = False
     gateway_host: str = ""
     gateway_user: str = ""
