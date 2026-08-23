@@ -8,6 +8,7 @@ import shlex
 import logging
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -18,7 +19,7 @@ from uuid import uuid4
 from .logging_utils import LOG_PATH, STATE_DIR, configure_logging, load_last_session, save_last_session
 from .profile_io import export_rdp, import_profiles, merge_profiles
 from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, RENDERERS, SCALE_FACTORS, Profile, command_for, local_display_settings,
-                       freerdp_client, load_profiles, save_profiles, validate_profile)
+                       freerdp_client, load_profiles, resolved_host, save_profiles, validate_profile)
 from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
 
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
@@ -283,6 +284,52 @@ def should_fallback_to_x11(renderer: str, returncode: int, fullscreened: bool) -
     return renderer == "wayland_sdl" and returncode != 0 and not fullscreened
 
 
+def rdp_endpoint(host: str) -> tuple[str, int]:
+    """Split a supported RDP host[:port] value, retaining IPv6 literals."""
+    if host.startswith("[") and "]:" in host:
+        name, port = host[1:].split("]:", 1)
+        return name, int(port)
+    name, separator, port = host.rpartition(":")
+    if separator and name and host.count(":") == 1 and port.isdecimal():
+        return name, int(port)
+    return host, 3389
+
+
+def tcp_rdp_reachable(host: str, timeout: float = 1.5) -> tuple[bool, str]:
+    """Check that a resolved target accepts a TCP connection on its RDP port."""
+    name, port = rdp_endpoint(resolved_host(host))
+    try:
+        addresses = socket.getaddrinfo(name, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        return False, f"cannot resolve {name}: {exc}"
+    failure = "connection refused or timed out"
+    for family, kind, protocol, _, address in addresses:
+        try:
+            with socket.socket(family, kind, protocol) as connection:
+                connection.settimeout(timeout)
+                if connection.connect_ex(address) == 0:
+                    return True, f"{address[0]}:{port} reachable"
+                failure = f"{address[0]}:{port} did not accept a connection"
+        except OSError as exc:
+            failure = str(exc)
+    return False, failure
+
+
+def preflight_profile(profile: Profile) -> list[str]:
+    """Return launch-blocking issues before FreeRDP changes terminal state."""
+    issues = validate_profile(profile)
+    client = freerdp_client(profile.renderer)
+    if client is None:
+        issues.append(f"FreeRDP renderer {profile.renderer!r} is not installed")
+    if profile.renderer == "wayland_sdl" and (not os.environ.get("WAYLAND_DISPLAY") or not shutil.which("hyprctl")):
+        issues.append("Wayland SDL requires an active Wayland/Hyprland session")
+    if not issues:
+        reachable, detail = tcp_rdp_reachable(profile.host)
+        if not reachable:
+            issues.append(f"RDP network check failed: {detail}")
+    return issues
+
+
 def status_text(last_result: str = "") -> str:
     """Describe whether a usable FreeRDP client is currently available."""
     client = freerdp_client()
@@ -329,11 +376,15 @@ def profile_status_lines(profile: Profile | None, last_session: dict[str, object
 
 def show_status(screen: curses.window, profile: Profile | None, last_session: dict[str, object]) -> None:
     """Present connection details without leaving the TUI or exposing secrets."""
+    lines = profile_status_lines(profile, last_session)
+    if profile is not None:
+        issues = preflight_profile(profile)
+        lines.insert(-1, "Preflight: " + ("ready" if not issues else " · ".join(issues)))
     while True:
         screen.erase()
         height, width = screen.getmaxyx()
         screen.addnstr(0, 0, "Connection status", width - 1, curses.A_BOLD)
-        for index, line in enumerate(profile_status_lines(profile, last_session)):
+        for index, line in enumerate(lines):
             if index + 2 >= height - 1:
                 break
             screen.addnstr(index + 2, 0, line, width - 1)
@@ -469,17 +520,9 @@ def run(screen: curses.window) -> None:
         elif key in (10, 13, curses.KEY_ENTER) and visible:
             profile = visible[selected]
             client = freerdp_client(profile.renderer)
-            if client is None:
-                message = f"FreeRDP renderer {profile.renderer!r} is not installed."
-                LOGGER.error("Launch blocked: no FreeRDP client")
-                continue
-            if profile.renderer == "wayland_sdl" and (not os.environ.get("WAYLAND_DISPLAY") or not shutil.which("hyprctl")):
-                message = "Wayland SDL renderer requires an active Wayland/Hyprland session."
-                LOGGER.error("Launch blocked: Wayland SDL requirements unavailable")
-                continue
-            problems = validate_profile(profile)
-            if problems:
-                message = "Launch blocked: " + " · ".join(problems)
+            problems = preflight_profile(profile)
+            if problems or client is None:
+                message = "Launch blocked: " + " · ".join(problems or ["FreeRDP client unavailable"])
                 LOGGER.error("Launch blocked for profile=%r: %s", profile.name, "; ".join(problems))
                 continue
             detected_resolution, detected_desktop_scale = "", 0

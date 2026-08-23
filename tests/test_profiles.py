@@ -5,8 +5,8 @@ from tempfile import TemporaryDirectory
 
 from rdp_tui.profiles import (Profile, command_for, freerdp_client, load_profiles, local_display_resolution, local_display_settings,
                               resolved_host, save_profiles, validate_profile)
-from rdp_tui.app import (filtered_profiles, fullscreen_wayland_sdl_window, profile_status_lines, should_fallback_to_x11,
-                         status_text)
+from rdp_tui.app import (filtered_profiles, fullscreen_wayland_sdl_window, preflight_profile, profile_status_lines,
+                         should_fallback_to_x11, status_text, tcp_rdp_reachable)
 from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
 from rdp_tui.profile_io import export_rdp, import_profiles, merge_profiles
 
@@ -180,6 +180,20 @@ class ProfileTests(unittest.TestCase):
         self.assertTrue(should_fallback_to_x11("wayland_sdl", 1, False))
         self.assertFalse(should_fallback_to_x11("wayland_sdl", 1, True))
         self.assertFalse(should_fallback_to_x11("x11", 1, False))
+
+    @patch("rdp_tui.app.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("10.0.0.41", 3389))])
+    @patch("rdp_tui.app.socket.socket")
+    def test_tcp_preflight_reports_reachable_target(self, socket_factory, _addresses):
+        socket_factory.return_value.__enter__.return_value.connect_ex.return_value = 0
+        reachable, detail = tcp_rdp_reachable("10.0.0.41")
+        self.assertTrue(reachable)
+        self.assertIn("10.0.0.41:3389", detail)
+
+    @patch("rdp_tui.app.tcp_rdp_reachable", return_value=(False, "connection refused"))
+    @patch("rdp_tui.app.freerdp_client", return_value="xfreerdp3")
+    def test_preflight_blocks_unreachable_target(self, _client, _network):
+        issues = preflight_profile(Profile("LAN", "10.0.0.41"))
+        self.assertEqual(issues, ["RDP network check failed: connection refused"])
 
     @patch("rdp_tui.secrets.keyring_available", return_value=False)
     def test_automatic_storage_falls_back_without_keyring(self, _available):

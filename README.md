@@ -49,7 +49,9 @@ not maintained as a second source of truth.
 ## Diagnostics
 
 rdp-tui validates required fields, ports, and quoted extra options before it
-launches FreeRDP. Activity and FreeRDP output are retained in the owner-only
+launches FreeRDP. It also checks DNS/mDNS resolution and TCP reachability of
+the RDP port before launch; `S` reports the same preflight result. Activity and
+FreeRDP output are retained in the owner-only
 log at `~/.local/state/rdp-tui/rdp-tui.log`. Use `S` in the launcher to see
 the selected connection's effective client, renderer, display mode, password
 storage state, and last outcome. A credential-free copy of that last outcome is
