@@ -9,10 +9,15 @@ import shutil
 import socket
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+import re
 from uuid import uuid4
 
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rdp-tui" / "profiles.json"
 CLIENT_CANDIDATES = ("xfreerdp3", "xfreerdp")
+NETWORK_TYPES = {"auto", "modem", "broadband", "broadband-low", "broadband-high", "wan", "lan"}
+CERTIFICATE_POLICIES = {"default", "tofu", "ignore", "deny"}
+COLOR_DEPTHS = {0, 8, 15, 16, 24, 32}
+SCALE_FACTORS = {0, 100, 140, 180}
 
 
 @dataclass
@@ -28,6 +33,18 @@ class Profile:
     audio: bool = False
     ignore_certificate: bool = False
     extra_options: str = ""
+    resolution: str = ""
+    dynamic_resolution: bool = False
+    multimon: bool = False
+    span_monitors: bool = False
+    smart_sizing: bool = False
+    scale: int = 0
+    shared_folder: str = ""
+    microphone: bool = False
+    auto_reconnect: bool = False
+    network_type: str = "auto"
+    color_depth: int = 0
+    certificate_policy: str = "default"
 
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> "Profile":
@@ -85,8 +102,32 @@ def command_for(profile: Profile, client: str = "xfreerdp3") -> list[str]:
         command.append("+clipboard")
     if profile.audio:
         command.append("/sound")
-    if profile.ignore_certificate:
+    if profile.ignore_certificate or profile.certificate_policy == "ignore":
         command.append("/cert:ignore")
+    elif profile.certificate_policy != "default":
+        command.append(f"/cert:{profile.certificate_policy}")
+    if profile.resolution:
+        command.append(f"/size:{profile.resolution}")
+    if profile.dynamic_resolution:
+        command.append("+dynamic-resolution")
+    if profile.span_monitors:
+        command.append("/span")
+    elif profile.multimon:
+        command.append("/multimon")
+    if profile.smart_sizing:
+        command.append("/smart-sizing")
+    if profile.scale:
+        command.append(f"/scale:{profile.scale}")
+    if profile.shared_folder:
+        command.append(f"/drive:rdp-tui,{Path(profile.shared_folder).expanduser()}")
+    if profile.microphone:
+        command.append("/microphone")
+    if profile.auto_reconnect:
+        command.append("+auto-reconnect")
+    if profile.network_type != "auto":
+        command.append(f"/network:{profile.network_type}")
+    if profile.color_depth:
+        command.append(f"/bpp:{profile.color_depth}")
     if profile.extra_options:
         command.extend(shlex.split(profile.extra_options))
     return command
@@ -125,4 +166,26 @@ def validate_profile(profile: Profile) -> list[str]:
         shlex.split(profile.extra_options)
     except ValueError as exc:
         errors.append(f"Extra options are invalid: {exc}")
+    if profile.resolution:
+        match = re.fullmatch(r"(\d{2,5})x(\d{2,5})", profile.resolution)
+        if not match or not all(200 <= int(part) <= 16384 for part in match.groups()):
+            errors.append("Resolution must be WIDTHxHEIGHT (200–16384 each)")
+    if profile.dynamic_resolution and profile.multimon:
+        errors.append("Dynamic resolution cannot be used with multi-monitor")
+    if profile.span_monitors and profile.dynamic_resolution:
+        errors.append("Dynamic resolution cannot be used with span monitors")
+    if profile.shared_folder:
+        folder = Path(profile.shared_folder).expanduser()
+        if not folder.is_absolute() or not folder.is_dir():
+            errors.append("Shared folder must be an existing absolute directory")
+        elif "," in profile.shared_folder:
+            errors.append("Shared folder cannot contain a comma")
+    if profile.network_type not in NETWORK_TYPES:
+        errors.append("Network type is invalid")
+    if profile.certificate_policy not in CERTIFICATE_POLICIES:
+        errors.append("Certificate policy is invalid")
+    if profile.color_depth not in COLOR_DEPTHS:
+        errors.append("Colour depth must be 8, 15, 16, 24, or 32")
+    if profile.scale not in SCALE_FACTORS:
+        errors.append("Scale must be 100, 140, or 180")
     return errors

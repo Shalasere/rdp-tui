@@ -12,11 +12,14 @@ from dataclasses import replace
 from pathlib import Path
 
 from .logging_utils import LOG_PATH, STATE_DIR, configure_logging
-from .profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles, validate_profile
+from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, SCALE_FACTORS, Profile, command_for,
+                       freerdp_client, load_profiles, save_profiles, validate_profile)
 from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
 
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
-FORM_FIELDS = (*EDITABLE, "password_backend", "password")
+ADVANCED_FIELDS = ("resolution", "dynamic_resolution", "multimon", "span_monitors", "smart_sizing", "scale",
+                   "shared_folder", "microphone", "auto_reconnect", "network_type", "color_depth", "certificate_policy")
+FORM_FIELDS = (*EDITABLE, "advanced", "password_backend", "password")
 LOGGER = logging.getLogger("rdp_tui")
 
 
@@ -82,6 +85,62 @@ def password_prompt(screen: curses.window) -> str | None:
             response.append(key)
 
 
+def edit_advanced(screen: curses.window, value: Profile) -> None:
+    """Edit optional RDP settings without crowding the basic profile form."""
+    labels = {
+        "resolution": "Custom resolution", "dynamic_resolution": "Dynamic resolution", "multimon": "Multi-monitor",
+        "span_monitors": "Span monitors", "smart_sizing": "Smart sizing", "scale": "Display scale",
+        "shared_folder": "Share folder", "microphone": "Redirect microphone", "auto_reconnect": "Auto reconnect",
+        "network_type": "Network profile", "color_depth": "Colour depth", "certificate_policy": "Certificate policy",
+    }
+    selected, error = 0, ""
+    cyclic = {
+        "scale": tuple(sorted(SCALE_FACTORS)), "color_depth": tuple(sorted(COLOR_DEPTHS)),
+        "network_type": tuple(sorted(NETWORK_TYPES)), "certificate_policy": ("default", "tofu", "ignore", "deny"),
+    }
+    while True:
+        screen.erase()
+        height, width = screen.getmaxyx()
+        screen.addnstr(0, 0, "Advanced RDP settings", width - 1, curses.A_BOLD)
+        screen.addnstr(1, 0, "Only change a setting when you need it; defaults preserve simple FreeRDP behavior.", width - 1)
+        for index, field_name in enumerate(ADVANCED_FIELDS):
+            current = getattr(value, field_name)
+            rendered = "On" if current is True else "Off" if current is False else str(current or "Default")
+            screen.addnstr(index + 3, 0, f"{labels[field_name]:<22} {rendered}", width - 1,
+                           curses.A_REVERSE if index == selected else 0)
+        if error:
+            screen.addnstr(height - 2, 0, error, width - 1, curses.A_BOLD)
+        screen.addnstr(height - 1, 0, "[↑/↓] Choose  [Enter] Change  [A] Accept  [Q] Back", width - 1)
+        screen.refresh()
+        key = screen.getch()
+        field_name = ADVANCED_FIELDS[selected]
+        current = getattr(value, field_name)
+        if key in (ord("q"), ord("Q"), 27):
+            return
+        if key in (curses.KEY_UP, ord("k"), ord("K")):
+            selected = (selected - 1) % len(ADVANCED_FIELDS)
+        elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
+            selected = (selected + 1) % len(ADVANCED_FIELDS)
+        elif key in (ord("a"), ord("A")):
+            problems = validate_profile(value)
+            advanced_problems = [problem for problem in problems if "Profile name" not in problem and "Host " not in problem]
+            if advanced_problems:
+                error = " · ".join(advanced_problems)
+            else:
+                return
+        elif key in (ord(" "), 10, 13, curses.KEY_ENTER, ord("e"), ord("E")):
+            if isinstance(current, bool):
+                setattr(value, field_name, not current)
+            elif field_name in cyclic:
+                choices = cyclic[field_name]
+                setattr(value, field_name, choices[(choices.index(current) + 1) % len(choices)])
+            else:
+                answer = prompt(screen, labels[field_name], str(current))
+                if answer is not None:
+                    setattr(value, field_name, answer)
+            error = ""
+
+
 def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profile | None:
     """Edit one profile in a selectable form instead of a prompt sequence."""
     value = replace(profile) if profile else Profile(name="", host="")
@@ -89,6 +148,7 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
         "name": "Profile name", "host": "Host (or host:port)", "user": "User", "domain": "Domain",
         "fullscreen": "Fullscreen", "clipboard": "Share clipboard", "audio": "Redirect audio",
         "ignore_certificate": "Ignore certificate", "extra_options": "Extra FreeRDP options",
+        "advanced": "Advanced RDP settings",
         "password_backend": "Password storage",
         "password": "Saved password",
     }
@@ -106,6 +166,8 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
         for index, field_name in enumerate(FORM_FIELDS):
             if field_name == "password":
                 current = "Saved" if saved_password else "Not saved"
+            elif field_name == "advanced":
+                current = "Enter to configure"
             elif field_name == "password_backend":
                 labels_by_backend = {
                     "automatic": f"Automatic → {resolved_backend('automatic').replace('_', ' ')}",
@@ -125,7 +187,7 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
 
         key = screen.getch()
         field_name = FORM_FIELDS[selected]
-        current = getattr(value, field_name) if field_name not in {"password", "password_backend"} else None
+        current = getattr(value, field_name) if field_name not in {"advanced", "password", "password_backend"} else None
         if key in (ord("q"), ord("Q"), 27):
             return None
         if key in (curses.KEY_UP, ord("k"), ord("K")):
@@ -147,7 +209,9 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
                 return value
             error = " · ".join(problems)
         elif key in (ord(" "), 10, 13, curses.KEY_ENTER, ord("e"), ord("E")):
-            if field_name == "password_backend":
+            if field_name == "advanced":
+                edit_advanced(screen, value)
+            elif field_name == "password_backend":
                 choices = ("automatic", "encrypted_file", "keyring")
                 value.password_backend = choices[(choices.index(value.password_backend) + 1) % len(choices)]
                 try:

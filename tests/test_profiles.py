@@ -43,6 +43,31 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("Port must be between 1 and 65535", errors)
         self.assertTrue(any(error.startswith("Extra options are invalid") for error in errors))
 
+    def test_builds_advanced_rdp_options(self):
+        profile = Profile(
+            "Advanced", "10.0.0.41", resolution="1920x1080", dynamic_resolution=True,
+            smart_sizing=True, scale=140, microphone=True, auto_reconnect=True,
+            network_type="lan", color_depth=32, certificate_policy="tofu",
+        )
+        command = command_for(profile)
+        for option in ("/size:1920x1080", "+dynamic-resolution", "/smart-sizing", "/scale:140", "/microphone",
+                       "+auto-reconnect", "/network:lan", "/bpp:32", "/cert:tofu"):
+            self.assertIn(option, command)
+
+    def test_rejects_conflicting_advanced_display_options(self):
+        profile = Profile("Conflict", "10.0.0.41", dynamic_resolution=True, multimon=True)
+        self.assertIn("Dynamic resolution cannot be used with multi-monitor", validate_profile(profile))
+
+    def test_builds_folder_and_multimon_options(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as folder:
+            profile = Profile("Shares", "10.0.0.41", shared_folder=folder, multimon=True)
+            command = command_for(profile)
+            self.assertIn(f"/drive:rdp-tui,{folder}", command)
+            self.assertIn("/multimon", command)
+            self.assertEqual(validate_profile(profile), [])
+
     @patch("rdp_tui.profiles.shutil.which")
     def test_prefers_freerdp3(self, which):
         which.side_effect = lambda executable: "/usr/bin/xfreerdp3" if executable == "xfreerdp3" else None

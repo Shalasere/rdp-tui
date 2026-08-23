@@ -1,13 +1,13 @@
 # rdp-tui
 
-A small, dependency-free terminal UI for saved [FreeRDP](https://www.freerdp.com/) connections. It launches `xfreerdp`; it does not attempt to draw an RDP desktop inside the terminal.
+A small terminal UI for saved [FreeRDP](https://www.freerdp.com/) connections. It launches `xfreerdp`; it does not attempt to draw an RDP desktop inside the terminal.
 
 ## Features
 
 - Keyboard-first profile selection and editing
 - Profiles stored at `~/.config/rdp-tui/profiles.json` with owner-only permissions
 - Fullscreen, clipboard, audio, certificate, domain, and extra FreeRDP option controls
-- Passwords saved by default in an encrypted local file, separate from the profile JSON and sent to FreeRDP through stdin (not the command line)
+- Passwords saved by default in an encrypted local file, separate from the profile JSON and supplied through FreeRDP's askpass hook (not the command line)
 
 ## Install and run
 
@@ -47,5 +47,13 @@ rdp-tui validates required fields, ports, and quoted extra options before it
 launches FreeRDP. Activity and FreeRDP output are retained in the owner-only
 log at `~/.local/state/rdp-tui/rdp-tui.log`. Use `S` in the launcher to see
 its location, or inspect the latest output with `tail -n 100 ~/.local/state/rdp-tui/rdp-tui.log`.
+
+## Advanced RDP settings
+
+The basic form keeps common connection settings concise. Select **Advanced RDP
+settings** only when needed to configure custom or dynamic resolution,
+multi-monitor/span mode, smart sizing, display scale, an existing local folder
+share, microphone redirection, automatic reconnect, a network profile, colour
+depth, or certificate policy. These map directly to documented FreeRDP options.
 
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.
