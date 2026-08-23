@@ -26,6 +26,11 @@ class ProfileTests(unittest.TestCase):
     def test_empty_domain_is_explicit(self):
         self.assertIn("/d:", command_for(Profile("LAN", "10.0.0.41")))
 
+    def test_migrates_null_storage_fields(self):
+        profile = Profile.from_dict({"name": "Legacy", "host": "10.0.0.41", "id": None, "password_backend": None})
+        self.assertIsInstance(profile.id, str)
+        self.assertEqual(profile.password_backend, "automatic")
+
     def test_rejects_invalid_host_port_and_options(self):
         profile = Profile("Bad", "rdp.example.test:99999", extra_options='"unterminated')
         errors = validate_profile(profile)

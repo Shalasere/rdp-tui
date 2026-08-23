@@ -30,7 +30,13 @@ class Profile:
 
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> "Profile":
-        fields = {key: value[key] for key in cls.__dataclass_fields__ if key in value}
+        # Older profile files can contain null entries for fields added in newer
+        # releases. Omit them so dataclass defaults migrate the profile safely.
+        fields = {key: value[key] for key in cls.__dataclass_fields__ if value.get(key) is not None}
+        if fields.get("password_backend") not in {"automatic", "encrypted_file", "keyring"}:
+            fields.pop("password_backend", None)
+        if not isinstance(fields.get("id"), str):
+            fields.pop("id", None)
         return cls(**fields)  # type: ignore[arg-type]
 
 
