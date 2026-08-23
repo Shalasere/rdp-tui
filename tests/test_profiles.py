@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from rdp_tui.profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles
 from rdp_tui.app import status_text
-from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password
+from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
 
 
 class ProfileTests(unittest.TestCase):
@@ -47,3 +47,7 @@ class ProfileTests(unittest.TestCase):
             self.assertNotIn("correct horse battery staple", secrets_path.read_text())
             _delete_file_password("profile-id", secrets_path)
             self.assertIsNone(_file_password("profile-id", secrets_path, key_path))
+
+    @patch("rdp_tui.secrets.keyring_available", return_value=False)
+    def test_automatic_storage_falls_back_without_keyring(self, _available):
+        self.assertEqual(resolved_backend("automatic"), "encrypted_file")

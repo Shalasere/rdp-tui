@@ -27,7 +27,7 @@ distributions use `xfreerdp`. rdp-tui detects either, preferring `xfreerdp3`.
 
 Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect. The profile editor shows every field at once: select a row, press `Enter` to edit it (or `Space` to toggle an option), then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availability and the result of the last session; press `s` for a detailed status line. Press `q` to quit.
 
-Leave **Domain** empty for a local account; rdp-tui passes that as an explicit empty domain so FreeRDP does not request one. The **Password storage** form row defaults to **Encrypted file**; select **Saved password** to store or replace a password. It is encrypted in `~/.config/rdp-tui/secrets.json`, with its owner-only key held in `~/.config/rdp-tui/.password-key`; neither is committed or shared. The optional **Keyring (Secret Service)** mode works only when you install and run a compatible keyring yourself.
+Leave **Domain** empty for a local account; rdp-tui passes that as an explicit empty domain so FreeRDP does not request one. The **Password storage** row defaults to **Automatic**, like Remmina: it uses a currently running Secret Service keyring when available and otherwise chooses the encrypted file. It does not start a keyring just to check. Select **Saved password** to store or replace a password. The fallback is encrypted in `~/.config/rdp-tui/secrets.json`, with its owner-only key held in `~/.config/rdp-tui/.password-key`; neither is committed or shared.
 
 ## Development
 

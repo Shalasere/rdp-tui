@@ -87,6 +87,29 @@ def _keyring_command(action: str, profile_id: str) -> list[str]:
     return ["secret-tool", action, "application", "rdp-tui", "profile", profile_id]
 
 
+def keyring_available() -> bool:
+    """Check for a running Secret Service without activating a wallet."""
+    if not shutil.which("secret-tool") or not shutil.which("busctl"):
+        return False
+    result = subprocess.run(
+        ["busctl", "--user", "--no-pager", "--no-legend", "list"], text=True, capture_output=True, check=False
+    )
+    for line in result.stdout.splitlines():
+        columns = line.split()
+        if len(columns) >= 2 and columns[0] == "org.freedesktop.secrets":
+            return columns[1] != "-"
+    return False
+
+
+def resolved_backend(backend: str) -> str:
+    """Apply Remmina-style automatic selection without starting a keyring."""
+    if backend == "automatic":
+        return "keyring" if keyring_available() else "encrypted_file"
+    if backend in {"encrypted_file", "keyring"}:
+        return backend
+    raise SecretStoreError(f"Unknown password backend: {backend}")
+
+
 def _keyring_password(profile_id: str) -> str | None:
     if not shutil.which("secret-tool"):
         raise SecretStoreError("secret-tool is not installed for the Keyring backend.")
@@ -113,8 +136,9 @@ def _delete_keyring_password(profile_id: str) -> None:
         subprocess.run(_keyring_command("clear", profile_id), text=True, capture_output=True, check=False)
 
 
-def password_for(profile_id: str, backend: str = "encrypted_file") -> str | None:
+def password_for(profile_id: str, backend: str = "automatic") -> str | None:
     """Get a saved password from the selected storage backend."""
+    backend = resolved_backend(backend)
     if backend == "encrypted_file":
         return _file_password(profile_id)
     if backend == "keyring":
@@ -122,8 +146,9 @@ def password_for(profile_id: str, backend: str = "encrypted_file") -> str | None
     raise SecretStoreError(f"Unknown password backend: {backend}")
 
 
-def save_password(profile_id: str, password: str, backend: str = "encrypted_file") -> None:
+def save_password(profile_id: str, password: str, backend: str = "automatic") -> None:
     """Save a password in the selected storage backend."""
+    backend = resolved_backend(backend)
     if backend == "encrypted_file":
         _save_file_password(profile_id, password)
     elif backend == "keyring":
@@ -132,8 +157,9 @@ def save_password(profile_id: str, password: str, backend: str = "encrypted_file
         raise SecretStoreError(f"Unknown password backend: {backend}")
 
 
-def delete_password(profile_id: str, backend: str = "encrypted_file") -> None:
+def delete_password(profile_id: str, backend: str = "automatic") -> None:
     """Delete a password from the selected storage backend."""
+    backend = resolved_backend(backend)
     if backend == "encrypted_file":
         _delete_file_password(profile_id)
     elif backend == "keyring":

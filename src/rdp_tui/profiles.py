@@ -18,7 +18,7 @@ class Profile:
     name: str
     host: str
     id: str = field(default_factory=lambda: str(uuid4()))
-    password_backend: str = "encrypted_file"
+    password_backend: str = "automatic"
     user: str = ""
     domain: str = ""
     fullscreen: bool = True

@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import replace
 
 from .profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles
-from .secrets import SecretStoreError, delete_password, password_for, save_password
+from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
 
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
 FORM_FIELDS = (*EDITABLE, "password_backend", "password")
@@ -90,7 +90,12 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
             if field_name == "password":
                 current = "Saved" if saved_password else "Not saved"
             elif field_name == "password_backend":
-                current = "Encrypted file" if value.password_backend == "encrypted_file" else "Keyring (Secret Service)"
+                labels_by_backend = {
+                    "automatic": f"Automatic → {resolved_backend('automatic').replace('_', ' ')}",
+                    "encrypted_file": "Encrypted file",
+                    "keyring": "Keyring (Secret Service)",
+                }
+                current = labels_by_backend[value.password_backend]
             else:
                 current = getattr(value, field_name)
             rendered = "On" if current is True else "Off" if current is False else str(current or "—")
@@ -125,7 +130,8 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
             error = "Profile name and host are required before accepting."
         elif key in (ord(" "), 10, 13, curses.KEY_ENTER, ord("e"), ord("E")):
             if field_name == "password_backend":
-                value.password_backend = "keyring" if value.password_backend == "encrypted_file" else "encrypted_file"
+                choices = ("automatic", "encrypted_file", "keyring")
+                value.password_backend = choices[(choices.index(value.password_backend) + 1) % len(choices)]
                 try:
                     saved_password = password_for(value.id, value.password_backend) is not None
                 except SecretStoreError:
