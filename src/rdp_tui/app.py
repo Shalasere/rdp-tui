@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .logging_utils import LOG_PATH, STATE_DIR, configure_logging, load_last_session, save_last_session
+from .profile_io import export_rdp, import_profiles, merge_profiles
 from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, RENDERERS, SCALE_FACTORS, Profile, command_for, local_display_settings,
                        freerdp_client, load_profiles, save_profiles, validate_profile)
 from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
@@ -341,7 +342,7 @@ def draw(screen: curses.window, profiles: list[Profile], selected: int, message:
     screen.erase()
     height, width = screen.getmaxyx()
     screen.addnstr(0, 0, "rdp-tui  •  FreeRDP profile launcher", width - 1, curses.A_BOLD)
-    screen.addnstr(1, 0, "[Enter] Connect  [A] Add  [E] Edit  [D] Delete  [S] Status  [Q] Quit", width - 1)
+    screen.addnstr(1, 0, "[Enter] Connect  [A] Add  [E] Edit  [D] Delete  [I] Import  [X] Export  [S] Status  [Q] Quit", width - 1)
     if not profiles:
         screen.addnstr(4, 0, "No profiles yet. Press a to add one.", width - 1)
     for index, profile in enumerate(profiles):
@@ -393,6 +394,35 @@ def run(screen: curses.window) -> None:
                 profiles.pop(selected)
                 save_profiles(profiles)
                 LOGGER.info("Deleted profile name=%r", name)
+        elif key == ord("i"):
+            answer = prompt(screen, "Import .remmina, .rdp, or rdp-tui JSON backup")
+            if answer:
+                try:
+                    imported = import_profiles(Path(answer).expanduser())
+                    if not imported:
+                        raise ValueError("The file contains no profiles")
+                    profiles = merge_profiles(profiles, imported)
+                    save_profiles(profiles)
+                    selected = len(profiles) - len(imported)
+                    message = f"Imported {len(imported)} profile(s); passwords are not imported."
+                    LOGGER.info("Imported %d profile(s) from %s", len(imported), answer)
+                except (OSError, ValueError) as exc:
+                    message = f"Import failed: {exc}"
+                    LOGGER.warning("Import failed from %s: %s", answer, exc)
+        elif key == ord("x") and profiles:
+            default_path = Path.home() / f"{profiles[selected].name}.rdp"
+            answer = prompt(screen, "Export selected profile to .rdp (password is excluded)", str(default_path))
+            if answer:
+                destination = Path(answer).expanduser()
+                if destination.suffix.lower() != ".rdp":
+                    destination = destination.with_suffix(".rdp")
+                try:
+                    export_rdp(profiles[selected], destination)
+                    message = f"Exported {profiles[selected].name} to {destination} (no password)."
+                    LOGGER.info("Exported profile name=%r to %s", profiles[selected].name, destination)
+                except OSError as exc:
+                    message = f"Export failed: {exc}"
+                    LOGGER.warning("Export failed to %s: %s", destination, exc)
         elif key == ord("s"):
             show_status(screen, profiles[selected] if profiles else None, load_last_session())
         elif key in (10, 13, curses.KEY_ENTER) and profiles:

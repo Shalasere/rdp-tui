@@ -1,10 +1,13 @@
 import unittest
 from unittest.mock import patch
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from rdp_tui.profiles import (Profile, command_for, freerdp_client, load_profiles, local_display_resolution, local_display_settings,
                               resolved_host, save_profiles, validate_profile)
 from rdp_tui.app import fullscreen_wayland_sdl_window, profile_status_lines, status_text
 from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
+from rdp_tui.profile_io import export_rdp, import_profiles, merge_profiles
 
 
 class ProfileTests(unittest.TestCase):
@@ -145,6 +148,27 @@ class ProfileTests(unittest.TestCase):
             self.assertNotIn("correct horse battery staple", secrets_path.read_text())
             _delete_file_password("profile-id", secrets_path)
             self.assertIsNone(_file_password("profile-id", secrets_path, key_path))
+
+    def test_import_remmina_and_export_rdp_without_password(self):
+        with TemporaryDirectory() as directory:
+            remmina = Path(directory) / "office.remmina"
+            remmina.write_text("[remmina]\nprotocol=RDP\nname=Office\nserver=rdp.example\nusername=EXAMPLE\\ada\nresolution_width=1920\nresolution_height=1080\n")
+            profile = import_profiles(remmina)[0]
+            self.assertEqual((profile.name, profile.user, profile.domain, profile.resolution),
+                             ("Office", "ada", "EXAMPLE", "1920x1080"))
+            exported = Path(directory) / "office.rdp"
+            export_rdp(profile, exported)
+            contents = exported.read_text()
+            self.assertIn("full address:s:rdp.example", contents)
+            self.assertNotIn("password", contents.lower())
+            imported = import_profiles(exported)[0]
+            self.assertEqual(imported.host, "rdp.example")
+
+    def test_merge_profiles_preserves_distinct_ids(self):
+        current = [Profile("Current", "one", id="same")]
+        incoming = [Profile("Imported", "two", id="same")]
+        merged = merge_profiles(current, incoming)
+        self.assertEqual(len({profile.id for profile in merged}), 2)
 
     @patch("rdp_tui.secrets.keyring_available", return_value=False)
     def test_automatic_storage_falls_back_without_keyring(self, _available):

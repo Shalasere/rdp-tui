@@ -8,6 +8,7 @@ A small terminal UI for saved [FreeRDP](https://www.freerdp.com/) connections. I
 - Profiles stored at `~/.config/rdp-tui/profiles.json` with owner-only permissions
 - Fullscreen, clipboard, audio, certificate, domain, and extra FreeRDP option controls
 - Passwords saved by default in an encrypted local file, separate from the profile JSON and supplied through FreeRDP's askpass hook (not the command line)
+- Import Remmina `.remmina`, standard `.rdp`, or native JSON backup profiles; export a selected profile as a password-free `.rdp` file
 
 ## Install and run
 
@@ -26,6 +27,8 @@ On Arch, FreeRDP 3 provides `xfreerdp3`; older releases and some other
 distributions use `xfreerdp`. rdp-tui detects either, preferring `xfreerdp3`.
 
 Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect. The profile editor shows every field at once: select a row, press `Enter` to edit it (or `Space` to toggle an option), then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availability and the result of the last session; press `s` for the selected profile's detailed status screen. Press `q` to quit.
+
+Press `i` to import a `.remmina`, `.rdp`, or rdp-tui JSON profile backup; imported passwords are deliberately excluded. Press `x` to export the selected profile as a standard `.rdp` file, also without its saved password.
 
 Leave **Domain** empty for a local account; rdp-tui passes that as an explicit empty domain so FreeRDP does not request one. The **Password storage** row defaults to **Automatic**, like Remmina: it uses a currently running Secret Service keyring when available and otherwise chooses the encrypted file. It does not start a keyring just to check. Select **Saved password** to store or replace a password. The fallback is encrypted in `~/.config/rdp-tui/secrets.json`, with its owner-only key held in `~/.config/rdp-tui/.password-key`; neither is committed or shared.
 
