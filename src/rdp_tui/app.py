@@ -278,6 +278,11 @@ def fullscreen_wayland_sdl_window(pid: int, timeout: float = 3.0) -> bool:
     return False
 
 
+def should_fallback_to_x11(renderer: str, returncode: int, fullscreened: bool) -> bool:
+    """Retry stable X11 only when the experimental SDL window never became usable."""
+    return renderer == "wayland_sdl" and returncode != 0 and not fullscreened
+
+
 def status_text(last_result: str = "") -> str:
     """Describe whether a usable FreeRDP client is currently available."""
     client = freerdp_client()
@@ -502,34 +507,52 @@ def run(screen: curses.window) -> None:
                             requested_resolution, requested_scale)
                 LOGGER.info("FreeRDP command: %s", shlex.join(command))
                 started = time.monotonic()
+                effective_client, effective_renderer = client, profile.renderer
+                fallback_used = False
                 with LOG_PATH.open("a", encoding="utf-8") as output:
                     if profile.renderer == "wayland_sdl":
                         process = subprocess.Popen(command, stdin=subprocess.DEVNULL if password is not None else None,
                                                    stdout=output, stderr=subprocess.STDOUT, env=environment)
                         LOGGER.info("Started SDL RDP process pid=%d; waiting for mapped Wayland window", process.pid)
-                        if profile.fullscreen:
-                            fullscreen_wayland_sdl_window(process.pid)
+                        fullscreened = profile.fullscreen and fullscreen_wayland_sdl_window(process.pid)
                         returncode = process.wait()
+                        if profile.fullscreen and should_fallback_to_x11(profile.renderer, returncode, fullscreened):
+                            fallback_client = freerdp_client("x11")
+                            if fallback_client:
+                                fallback_profile = replace(profile, renderer="x11")
+                                fallback_command = command_for(fallback_profile, fallback_client, detected_resolution)
+                                LOGGER.warning("SDL failed before mapping (exit=%d); retrying stable X11 client=%s: %s",
+                                               returncode, fallback_client, shlex.join(fallback_command))
+                                result = subprocess.run(fallback_command,
+                                                        stdin=subprocess.DEVNULL if password is not None else None,
+                                                        stdout=output, stderr=subprocess.STDOUT, env=environment,
+                                                        check=False)
+                                returncode = result.returncode
+                                effective_client, effective_renderer, fallback_used = fallback_client, "x11", True
+                            else:
+                                LOGGER.error("SDL failed before mapping and no stable X11 FreeRDP client is installed")
                     else:
                         result = subprocess.run(command, stdin=subprocess.DEVNULL if password is not None else None,
                                                 stdout=output, stderr=subprocess.STDOUT, env=environment,
                                                 check=False)
                         returncode = result.returncode
                 elapsed = time.monotonic() - started
-                last_result = f"{client} exited with code {returncode} after {elapsed:.1f}s."
+                last_result = f"{effective_client} exited with code {returncode} after {elapsed:.1f}s."
+                if fallback_used:
+                    last_result = "SDL failed before mapping; " + last_result
                 save_last_session({
                     "profile_id": profile.id,
                     "profile_name": profile.name,
-                    "client": client,
-                    "renderer": profile.renderer,
+                    "client": effective_client,
+                    "renderer": effective_renderer,
                     "requested_resolution": requested_resolution,
                     "exit_code": returncode,
                     "elapsed_seconds": round(elapsed, 1),
                     "finished_at": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
                 })
                 if returncode:
-                    LOGGER.error("FreeRDP exited code=%d after %.1fs for profile=%r", returncode, elapsed,
-                                 profile.name)
+                    LOGGER.error("FreeRDP exited code=%d after %.1fs for profile=%r renderer=%s", returncode, elapsed,
+                                 profile.name, effective_renderer)
                 else:
                     LOGGER.info("FreeRDP completed after %.1fs for profile=%r", elapsed, profile.name)
             except OSError as exc:

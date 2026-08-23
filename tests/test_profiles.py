@@ -5,7 +5,8 @@ from tempfile import TemporaryDirectory
 
 from rdp_tui.profiles import (Profile, command_for, freerdp_client, load_profiles, local_display_resolution, local_display_settings,
                               resolved_host, save_profiles, validate_profile)
-from rdp_tui.app import filtered_profiles, fullscreen_wayland_sdl_window, profile_status_lines, status_text
+from rdp_tui.app import (filtered_profiles, fullscreen_wayland_sdl_window, profile_status_lines, should_fallback_to_x11,
+                         status_text)
 from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
 from rdp_tui.profile_io import export_rdp, import_profiles, merge_profiles
 
@@ -174,6 +175,11 @@ class ProfileTests(unittest.TestCase):
         profiles = [Profile("Office", "rdp.example", user="ada", domain="EXAMPLE"), Profile("LAN", "10.0.0.41")]
         self.assertEqual(filtered_profiles(profiles, "example ada"), [profiles[0]])
         self.assertEqual(filtered_profiles(profiles, "10.0"), [profiles[1]])
+
+    def test_only_falls_back_when_sdl_never_maps(self):
+        self.assertTrue(should_fallback_to_x11("wayland_sdl", 1, False))
+        self.assertFalse(should_fallback_to_x11("wayland_sdl", 1, True))
+        self.assertFalse(should_fallback_to_x11("x11", 1, False))
 
     @patch("rdp_tui.secrets.keyring_available", return_value=False)
     def test_automatic_storage_falls_back_without_keyring(self, _available):
