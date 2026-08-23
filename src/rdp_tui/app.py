@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import curses
 import subprocess
+from dataclasses import replace
 
 from .profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles
 
@@ -38,27 +39,52 @@ def prompt(screen: curses.window, label: str, default: str = "") -> str | None:
 
 
 def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profile | None:
-    value = profile or Profile(name="", host="")
+    """Edit one profile in a selectable form instead of a prompt sequence."""
+    value = replace(profile) if profile else Profile(name="", host="")
     labels = {
         "name": "Profile name", "host": "Host (or host:port)", "user": "User", "domain": "Domain",
         "fullscreen": "Fullscreen", "clipboard": "Share clipboard", "audio": "Redirect audio",
         "ignore_certificate": "Ignore certificate", "extra_options": "Extra FreeRDP options",
     }
-    for field_name in EDITABLE:
+    selected, error = 0, ""
+    screen.keypad(True)
+    while True:
+        screen.erase()
+        height, width = screen.getmaxyx()
+        screen.addnstr(0, 0, "Edit RDP profile", width - 1, curses.A_BOLD)
+        screen.addnstr(1, 0, "Choose a field, then edit it. Nothing is saved until you accept.", width - 1)
+        for index, field_name in enumerate(EDITABLE):
+            current = getattr(value, field_name)
+            rendered = "On" if current is True else "Off" if current is False else str(current or "—")
+            row = f"{labels[field_name]:<22} {rendered}"
+            screen.addnstr(index + 3, 0, row, width - 1, curses.A_REVERSE if index == selected else 0)
+        if error:
+            screen.addnstr(height - 2, 0, error, width - 1, curses.A_BOLD)
+        screen.addnstr(height - 1, 0, "[↑/↓] Choose  [Enter/E] Edit  [Space] Toggle  [A] Accept  [Q] Quit", width - 1)
+        screen.refresh()
+
+        key = screen.getch()
+        field_name = EDITABLE[selected]
         current = getattr(value, field_name)
-        if isinstance(current, bool):
-            answer = prompt(screen, f"{labels[field_name]} [y/n]", "y" if current else "n")
-            if answer is None:
-                return None
-            setattr(value, field_name, answer.lower() in {"y", "yes", "true", "1"})
-        else:
-            answer = prompt(screen, labels[field_name], current)
-            if answer is None:
-                return None
-            setattr(value, field_name, answer)
-    if not value.name or not value.host:
-        return None
-    return value
+        if key in (ord("q"), ord("Q"), 27):
+            return None
+        if key in (curses.KEY_UP, ord("k"), ord("K")):
+            selected = (selected - 1) % len(EDITABLE)
+        elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
+            selected = (selected + 1) % len(EDITABLE)
+        elif key in (ord("a"), ord("A")):
+            if value.name and value.host:
+                return value
+            error = "Profile name and host are required before accepting."
+        elif key in (ord(" "), 10, 13, curses.KEY_ENTER, ord("e"), ord("E")):
+            if isinstance(current, bool):
+                setattr(value, field_name, not current)
+                error = ""
+            else:
+                answer = prompt(screen, labels[field_name], current)
+                if answer is not None:
+                    setattr(value, field_name, answer)
+                    error = ""
 
 
 def status_text(last_result: str = "") -> str:
