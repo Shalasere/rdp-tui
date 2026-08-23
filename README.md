@@ -2,6 +2,10 @@
 
 A small terminal UI for saved [FreeRDP](https://www.freerdp.com/) connections. It launches a FreeRDP client; it does not attempt to draw an RDP desktop inside the terminal.
 
+> **0.1 alpha:** The direct-RDP workflow is ready for daily testing. Wayland SDL
+> and SSH-tunnel configuration are experimental; the SSH tunnel launcher is not
+> implemented yet.
+
 ## Features
 
 - Keyboard-first profile selection and editing
