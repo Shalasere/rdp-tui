@@ -30,6 +30,8 @@ Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, 
 
 Press `i` to import a `.remmina`, `.rdp`, or rdp-tui JSON profile backup; imported passwords are deliberately excluded. Press `x` to export the selected profile as a standard `.rdp` file, also without its saved password.
 
+Press `c` to clone the selected profile (then adjust it before saving), or `f` to filter profiles by name, host, user, or domain. Leave the filter blank to clear it.
+
 Leave **Domain** empty for a local account; rdp-tui passes that as an explicit empty domain so FreeRDP does not request one. The **Password storage** row defaults to **Automatic**, like Remmina: it uses a currently running Secret Service keyring when available and otherwise chooses the encrypted file. It does not start a keyring just to check. Select **Saved password** to store or replace a password. The fallback is encrypted in `~/.config/rdp-tui/secrets.json`, with its owner-only key held in `~/.config/rdp-tui/.password-key`; neither is committed or shared.
 
 ## Development

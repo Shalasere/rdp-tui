@@ -13,6 +13,7 @@ import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
+from uuid import uuid4
 
 from .logging_utils import LOG_PATH, STATE_DIR, configure_logging, load_last_session, save_last_session
 from .profile_io import export_rdp, import_profiles, merge_profiles
@@ -338,13 +339,30 @@ def show_status(screen: curses.window, profile: Profile | None, last_session: di
             return
 
 
-def draw(screen: curses.window, profiles: list[Profile], selected: int, message: str, last_result: str) -> None:
+def filtered_profiles(profiles: list[Profile], query: str) -> list[Profile]:
+    """Return profiles matching a case-insensitive name, host, or user query."""
+    terms = query.casefold().split()
+    if not terms:
+        return profiles
+    return [profile for profile in profiles if all(term in " ".join((profile.name, profile.host, profile.user,
+                                                                        profile.domain)).casefold() for term in terms)]
+
+
+def profile_position(profiles: list[Profile], selected: Profile) -> int:
+    """Find a selected object by identity, even if profile values are duplicated."""
+    return next(index for index, profile in enumerate(profiles) if profile is selected)
+
+
+def draw(screen: curses.window, profiles: list[Profile], selected: int, message: str, last_result: str,
+         query: str = "") -> None:
     screen.erase()
     height, width = screen.getmaxyx()
     screen.addnstr(0, 0, "rdp-tui  •  FreeRDP profile launcher", width - 1, curses.A_BOLD)
-    screen.addnstr(1, 0, "[Enter] Connect  [A] Add  [E] Edit  [D] Delete  [I] Import  [X] Export  [S] Status  [Q] Quit", width - 1)
+    screen.addnstr(1, 0, "[Enter] Connect  [A] Add  [E] Edit  [C] Clone  [D] Delete  [F] Find  [I] Import  [X] Export  [S] Status  [Q] Quit", width - 1)
     if not profiles:
-        screen.addnstr(4, 0, "No profiles yet. Press a to add one.", width - 1)
+        screen.addnstr(4, 0, "No matching profiles. Press a to add one or f to clear the filter.", width - 1)
+    elif query:
+        screen.addnstr(3, 0, f"Filter: {query}", width - 1)
     for index, profile in enumerate(profiles):
         marker = "> " if index == selected else "  "
         detail = f"{profile.name:<22} {profile.user + '@' if profile.user else ''}{profile.host}"
@@ -363,17 +381,18 @@ def run(screen: curses.window) -> None:
         LOGGER.exception("Could not load profiles")
         raise SystemExit(f"rdp-tui: {exc}") from exc
     LOGGER.info("Launcher started with %d profile(s)", len(profiles))
-    selected, message, last_result = 0, "Passwords are saved securely when you set one in the profile editor.", ""
+    selected, message, last_result, query = 0, "Passwords are saved securely when you set one in the profile editor.", "", ""
     while True:
-        selected = max(0, min(selected, len(profiles) - 1))
-        draw(screen, profiles, selected, message, last_result)
+        visible = filtered_profiles(profiles, query)
+        selected = max(0, min(selected, len(visible) - 1))
+        draw(screen, visible, selected, message, last_result, query)
         key = screen.getch()
         message = ""
         if key in (ord("q"), 27):
             return
         if key in (curses.KEY_UP, ord("k")) and selected:
             selected -= 1
-        elif key in (curses.KEY_DOWN, ord("j")) and selected < len(profiles) - 1:
+        elif key in (curses.KEY_DOWN, ord("j")) and selected < len(visible) - 1:
             selected += 1
         elif key == ord("a"):
             profile = edit_profile(screen)
@@ -381,19 +400,35 @@ def run(screen: curses.window) -> None:
                 profiles.append(profile)
                 save_profiles(profiles)
                 LOGGER.info("Created profile name=%r host=%r", profile.name, profile.host)
+                query = ""
                 selected = len(profiles) - 1
-        elif key == ord("e") and profiles:
-            profile = edit_profile(screen, profiles[selected])
+        elif key == ord("e") and visible:
+            profile = edit_profile(screen, visible[selected])
             if profile:
-                profiles[selected] = profile
+                profiles[profile_position(profiles, visible[selected])] = profile
                 save_profiles(profiles)
                 LOGGER.info("Updated profile name=%r host=%r", profile.name, profile.host)
-        elif key == ord("d") and profiles:
-            name = profiles[selected].name
+        elif key == ord("c") and visible:
+            source = visible[selected]
+            duplicate = replace(source, id=str(uuid4()), name=f"{source.name} (copy)")
+            profile = edit_profile(screen, duplicate)
+            if profile:
+                profiles.append(profile)
+                save_profiles(profiles)
+                query = ""
+                selected = len(profiles) - 1
+                LOGGER.info("Cloned profile source=%r clone=%r", source.name, profile.name)
+        elif key == ord("d") and visible:
+            name = visible[selected].name
             if prompt(screen, f"Delete {name}? Type yes", "no").lower() == "yes":
-                profiles.pop(selected)
+                profiles.pop(profile_position(profiles, visible[selected]))
                 save_profiles(profiles)
                 LOGGER.info("Deleted profile name=%r", name)
+        elif key == ord("f"):
+            answer = prompt(screen, "Filter profiles by name, host, user, or domain (blank clears)", "")
+            if answer is not None:
+                query = answer
+                selected = 0
         elif key == ord("i"):
             answer = prompt(screen, "Import .remmina, .rdp, or rdp-tui JSON backup")
             if answer:
@@ -403,30 +438,31 @@ def run(screen: curses.window) -> None:
                         raise ValueError("The file contains no profiles")
                     profiles = merge_profiles(profiles, imported)
                     save_profiles(profiles)
+                    query = ""
                     selected = len(profiles) - len(imported)
                     message = f"Imported {len(imported)} profile(s); passwords are not imported."
                     LOGGER.info("Imported %d profile(s) from %s", len(imported), answer)
                 except (OSError, ValueError) as exc:
                     message = f"Import failed: {exc}"
                     LOGGER.warning("Import failed from %s: %s", answer, exc)
-        elif key == ord("x") and profiles:
-            default_path = Path.home() / f"{profiles[selected].name}.rdp"
+        elif key == ord("x") and visible:
+            default_path = Path.home() / f"{visible[selected].name}.rdp"
             answer = prompt(screen, "Export selected profile to .rdp (password is excluded)", str(default_path))
             if answer:
                 destination = Path(answer).expanduser()
                 if destination.suffix.lower() != ".rdp":
                     destination = destination.with_suffix(".rdp")
                 try:
-                    export_rdp(profiles[selected], destination)
-                    message = f"Exported {profiles[selected].name} to {destination} (no password)."
-                    LOGGER.info("Exported profile name=%r to %s", profiles[selected].name, destination)
+                    export_rdp(visible[selected], destination)
+                    message = f"Exported {visible[selected].name} to {destination} (no password)."
+                    LOGGER.info("Exported profile name=%r to %s", visible[selected].name, destination)
                 except OSError as exc:
                     message = f"Export failed: {exc}"
                     LOGGER.warning("Export failed to %s: %s", destination, exc)
         elif key == ord("s"):
-            show_status(screen, profiles[selected] if profiles else None, load_last_session())
-        elif key in (10, 13, curses.KEY_ENTER) and profiles:
-            profile = profiles[selected]
+            show_status(screen, visible[selected] if visible else None, load_last_session())
+        elif key in (10, 13, curses.KEY_ENTER) and visible:
+            profile = visible[selected]
             client = freerdp_client(profile.renderer)
             if client is None:
                 message = f"FreeRDP renderer {profile.renderer!r} is not installed."
@@ -449,7 +485,7 @@ def run(screen: curses.window) -> None:
                 password = password_for(profile.id, profile.password_backend)
             except SecretStoreError as exc:
                 message = f"Password store unavailable: {exc}"
-                LOGGER.exception("Password store failed for profile=%r", profiles[selected].name)
+                LOGGER.exception("Password store failed for profile=%r", profile.name)
                 continue
             askpass_path = None
             environment = None
@@ -459,8 +495,8 @@ def run(screen: curses.window) -> None:
             curses.def_prog_mode()
             curses.endwin()
             try:
-                requested_resolution = profiles[selected].resolution or detected_resolution or "FreeRDP default"
-                requested_scale = profiles[selected].scale or detected_desktop_scale or 100
+                requested_resolution = profile.resolution or detected_resolution or "FreeRDP default"
+                requested_scale = profile.scale or detected_desktop_scale or 100
                 LOGGER.info("Launching profile name=%r host=%r client=%s renderer=%s saved_password=%s requested_resolution=%s desktop_scale=%s",
                             profile.name, profile.host, client, profile.renderer, password is not None,
                             requested_resolution, requested_scale)
