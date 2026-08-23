@@ -7,7 +7,7 @@ A small, dependency-free terminal UI for saved [FreeRDP](https://www.freerdp.com
 - Keyboard-first profile selection and editing
 - Profiles stored at `~/.config/rdp-tui/profiles.json` with owner-only permissions
 - Fullscreen, clipboard, audio, certificate, domain, and extra FreeRDP option controls
-- Passwords are **not** stored or supplied on the command line; FreeRDP requests them when needed
+- Passwords saved by default in an encrypted local file, separate from the profile JSON and sent to FreeRDP through stdin (not the command line)
 
 ## Install and run
 
@@ -27,6 +27,8 @@ distributions use `xfreerdp`. rdp-tui detects either, preferring `xfreerdp3`.
 
 Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect. The profile editor shows every field at once: select a row, press `Enter` to edit it (or `Space` to toggle an option), then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availability and the result of the last session; press `s` for a detailed status line. Press `q` to quit.
 
+Leave **Domain** empty for a local account; rdp-tui passes that as an explicit empty domain so FreeRDP does not request one. The **Password storage** form row defaults to **Encrypted file**; select **Saved password** to store or replace a password. It is encrypted in `~/.config/rdp-tui/secrets.json`, with its owner-only key held in `~/.config/rdp-tui/.password-key`; neither is committed or shared. The optional **Keyring (Secret Service)** mode works only when you install and run a compatible keyring yourself.
+
 ## Development
 
 ```sh
@@ -35,9 +37,8 @@ make test
 make run
 ```
 
-The `.venv` directory is local-only and ignored by Git. This project has no
-runtime or development package dependencies beyond Python, so an otherwise
-empty `requirements.txt` is intentionally not included; dependencies are
-declared in `pyproject.toml` when needed.
+The `.venv` directory is local-only and ignored by Git. Runtime dependencies
+are declared in `pyproject.toml`; an extra `requirements.txt` is intentionally
+not maintained as a second source of truth.
 
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.

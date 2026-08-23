@@ -7,8 +7,10 @@ import subprocess
 from dataclasses import replace
 
 from .profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles
+from .secrets import SecretStoreError, delete_password, password_for, save_password
 
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
+FORM_FIELDS = (*EDITABLE, "password_backend", "password")
 
 
 def prompt(screen: curses.window, label: str, default: str = "") -> str | None:
@@ -38,6 +40,31 @@ def prompt(screen: curses.window, label: str, default: str = "") -> str | None:
             response.append(key)
 
 
+def password_prompt(screen: curses.window) -> str | None:
+    """Prompt for a secret without echoing it to the terminal."""
+    response: list[str] = []
+    screen.keypad(True)
+    curses.curs_set(1)
+    while True:
+        screen.erase()
+        screen.addstr(0, 0, "Saved password (Enter saves; an empty value removes it)")
+        screen.addstr(2, 0, "> " + "*" * len(response))
+        screen.move(2, 2 + len(response))
+        screen.refresh()
+        key = screen.get_wch()
+        if key in ("\n", "\r", curses.KEY_ENTER):
+            curses.curs_set(0)
+            return "".join(response)
+        if key == "\x1b":
+            curses.curs_set(0)
+            return None
+        if key in (curses.KEY_BACKSPACE, curses.KEY_DC, "\x08", "\x7f"):
+            if response:
+                response.pop()
+        elif isinstance(key, str) and key.isprintable() and len(response) < 512:
+            response.append(key)
+
+
 def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profile | None:
     """Edit one profile in a selectable form instead of a prompt sequence."""
     value = replace(profile) if profile else Profile(name="", host="")
@@ -45,16 +72,27 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
         "name": "Profile name", "host": "Host (or host:port)", "user": "User", "domain": "Domain",
         "fullscreen": "Fullscreen", "clipboard": "Share clipboard", "audio": "Redirect audio",
         "ignore_certificate": "Ignore certificate", "extra_options": "Extra FreeRDP options",
+        "password_backend": "Password storage",
+        "password": "Saved password",
     }
-    selected, error = 0, ""
+    try:
+        saved_password = password_for(value.id, value.password_backend) is not None
+    except SecretStoreError:
+        saved_password = False
+    selected, error, pending_password = 0, "", None
     screen.keypad(True)
     while True:
         screen.erase()
         height, width = screen.getmaxyx()
         screen.addnstr(0, 0, "Edit RDP profile", width - 1, curses.A_BOLD)
         screen.addnstr(1, 0, "Choose a field, then edit it. Nothing is saved until you accept.", width - 1)
-        for index, field_name in enumerate(EDITABLE):
-            current = getattr(value, field_name)
+        for index, field_name in enumerate(FORM_FIELDS):
+            if field_name == "password":
+                current = "Saved" if saved_password else "Not saved"
+            elif field_name == "password_backend":
+                current = "Encrypted file" if value.password_backend == "encrypted_file" else "Keyring (Secret Service)"
+            else:
+                current = getattr(value, field_name)
             rendered = "On" if current is True else "Off" if current is False else str(current or "—")
             row = f"{labels[field_name]:<22} {rendered}"
             screen.addnstr(index + 3, 0, row, width - 1, curses.A_REVERSE if index == selected else 0)
@@ -64,20 +102,42 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
         screen.refresh()
 
         key = screen.getch()
-        field_name = EDITABLE[selected]
-        current = getattr(value, field_name)
+        field_name = FORM_FIELDS[selected]
+        current = getattr(value, field_name) if field_name not in {"password", "password_backend"} else None
         if key in (ord("q"), ord("Q"), 27):
             return None
         if key in (curses.KEY_UP, ord("k"), ord("K")):
-            selected = (selected - 1) % len(EDITABLE)
+            selected = (selected - 1) % len(FORM_FIELDS)
         elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
-            selected = (selected + 1) % len(EDITABLE)
+            selected = (selected + 1) % len(FORM_FIELDS)
         elif key in (ord("a"), ord("A")):
             if value.name and value.host:
+                if pending_password is not None:
+                    try:
+                        if pending_password:
+                            save_password(value.id, pending_password, value.password_backend)
+                        else:
+                            delete_password(value.id, value.password_backend)
+                    except SecretStoreError as exc:
+                        error = f"Could not update saved password: {exc}"
+                        continue
                 return value
             error = "Profile name and host are required before accepting."
         elif key in (ord(" "), 10, 13, curses.KEY_ENTER, ord("e"), ord("E")):
-            if isinstance(current, bool):
+            if field_name == "password_backend":
+                value.password_backend = "keyring" if value.password_backend == "encrypted_file" else "encrypted_file"
+                try:
+                    saved_password = password_for(value.id, value.password_backend) is not None
+                except SecretStoreError:
+                    saved_password = False
+                error = ""
+            elif field_name == "password":
+                answer = password_prompt(screen)
+                if answer is not None:
+                    pending_password = answer
+                    saved_password = bool(answer)
+                    error = ""
+            elif isinstance(current, bool):
                 setattr(value, field_name, not current)
                 error = ""
             else:
@@ -157,9 +217,16 @@ def run(screen: curses.window) -> None:
                 message = "FreeRDP is not installed or not on PATH (tried xfreerdp3, xfreerdp)."
                 continue
             command = command_for(profiles[selected], client)
+            try:
+                password = password_for(profiles[selected].id, profiles[selected].password_backend)
+            except SecretStoreError as exc:
+                message = f"Password store unavailable: {exc}"
+                continue
+            if password is not None:
+                command.append("/from-stdin:force")
             curses.endwin()
             try:
-                result = subprocess.run(command, check=False)
+                result = subprocess.run(command, input=password, text=True, check=False)
                 last_result = f"{client} exited with code {result.returncode}."
             finally:
                 screen.refresh()

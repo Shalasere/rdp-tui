@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from rdp_tui.profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles
 from rdp_tui.app import status_text
+from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password
 
 
 class ProfileTests(unittest.TestCase):
@@ -14,13 +15,16 @@ class ProfileTests(unittest.TestCase):
                 from pathlib import Path
 
                 path = Path(directory) / "profiles.json"
-                profile = Profile("Work", "rdp.example.test", "ada", "EXAMPLE", audio=True)
+                profile = Profile("Work", "rdp.example.test", user="ada", domain="EXAMPLE", audio=True)
                 save_profiles([profile], path)
                 self.assertEqual(load_profiles(path), [profile])
 
         self.assertEqual(command_for(profile, "xfreerdp3"), [
             "xfreerdp3", "/v:rdp.example.test", "/u:ada", "/d:EXAMPLE", "/f", "+clipboard", "/sound",
         ])
+
+    def test_empty_domain_is_explicit(self):
+        self.assertIn("/d:", command_for(Profile("LAN", "10.0.0.41")))
 
     @patch("rdp_tui.profiles.shutil.which")
     def test_prefers_freerdp3(self, which):
@@ -30,3 +34,16 @@ class ProfileTests(unittest.TestCase):
     @patch("rdp_tui.app.freerdp_client", return_value="xfreerdp3")
     def test_status_reports_ready_client(self, _client):
         self.assertEqual(status_text(), "Status: Ready — xfreerdp3 detected.")
+
+    def test_encrypted_file_password_store(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            secrets_path = Path(directory) / "secrets.json"
+            key_path = Path(directory) / ".password-key"
+            _save_file_password("profile-id", "correct horse battery staple", secrets_path, key_path)
+            self.assertEqual(_file_password("profile-id", secrets_path, key_path), "correct horse battery staple")
+            self.assertNotIn("correct horse battery staple", secrets_path.read_text())
+            _delete_file_password("profile-id", secrets_path)
+            self.assertIsNone(_file_password("profile-id", secrets_path, key_path))

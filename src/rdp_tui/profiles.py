@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rdp-tui" / "profiles.json"
 CLIENT_CANDIDATES = ("xfreerdp3", "xfreerdp")
@@ -16,6 +17,8 @@ CLIENT_CANDIDATES = ("xfreerdp3", "xfreerdp")
 class Profile:
     name: str
     host: str
+    id: str = field(default_factory=lambda: str(uuid4()))
+    password_backend: str = "encrypted_file"
     user: str = ""
     domain: str = ""
     fullscreen: bool = True
@@ -62,8 +65,9 @@ def command_for(profile: Profile, client: str = "xfreerdp3") -> list[str]:
     command = [client, f"/v:{profile.host}"]
     if profile.user:
         command.append(f"/u:{profile.user}")
-    if profile.domain:
-        command.append(f"/d:{profile.domain}")
+    # Explicitly pass an empty domain for local accounts so FreeRDP does not
+    # prompt for one during credential collection.
+    command.append(f"/d:{profile.domain}")
     if profile.fullscreen:
         command.append("/f")
     if profile.clipboard:

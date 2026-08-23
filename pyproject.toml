@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rdp-tui"
-version = "0.1.1"
+version = "0.1.2"
 description = "A keyboard-driven launcher for FreeRDP profiles"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "rdp-tui contributors"}]
+dependencies = ["cryptography>=42"]
 classifiers = [
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
