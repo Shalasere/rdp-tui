@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from rdp_tui.profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles
+from rdp_tui.profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles, validate_profile
 from rdp_tui.app import status_text
 from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
 
@@ -25,6 +25,12 @@ class ProfileTests(unittest.TestCase):
 
     def test_empty_domain_is_explicit(self):
         self.assertIn("/d:", command_for(Profile("LAN", "10.0.0.41")))
+
+    def test_rejects_invalid_host_port_and_options(self):
+        profile = Profile("Bad", "rdp.example.test:99999", extra_options='"unterminated')
+        errors = validate_profile(profile)
+        self.assertIn("Port must be between 1 and 65535", errors)
+        self.assertTrue(any(error.startswith("Extra options are invalid") for error in errors))
 
     @patch("rdp_tui.profiles.shutil.which")
     def test_prefers_freerdp3(self, which):

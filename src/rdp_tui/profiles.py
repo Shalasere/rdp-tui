@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -77,7 +78,28 @@ def command_for(profile: Profile, client: str = "xfreerdp3") -> list[str]:
     if profile.ignore_certificate:
         command.append("/cert:ignore")
     if profile.extra_options:
-        # Deliberately split on whitespace: options needing spaces should be quoted
-        # in the profile and are not supported in this deliberately simple field.
-        command.extend(profile.extra_options.split())
+        command.extend(shlex.split(profile.extra_options))
     return command
+
+
+def validate_profile(profile: Profile) -> list[str]:
+    """Return actionable errors without attempting a network connection."""
+    errors: list[str] = []
+    if not profile.name.strip():
+        errors.append("Profile name is required")
+    host = profile.host.strip()
+    if not host:
+        errors.append("Host is required")
+    elif any(character.isspace() for character in host):
+        errors.append("Host cannot contain whitespace")
+    else:
+        host_part, separator, port = host.rpartition(":")
+        # A single colon identifies host:port; multiple colons are IPv6.
+        if separator and host_part and host.count(":") == 1:
+            if not port.isdecimal() or not 1 <= int(port) <= 65535:
+                errors.append("Port must be between 1 and 65535")
+    try:
+        shlex.split(profile.extra_options)
+    except ValueError as exc:
+        errors.append(f"Extra options are invalid: {exc}")
+    return errors

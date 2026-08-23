@@ -41,4 +41,11 @@ The `.venv` directory is local-only and ignored by Git. Runtime dependencies
 are declared in `pyproject.toml`; an extra `requirements.txt` is intentionally
 not maintained as a second source of truth.
 
+## Diagnostics
+
+rdp-tui validates required fields, ports, and quoted extra options before it
+launches FreeRDP. Activity and FreeRDP output are retained in the owner-only
+log at `~/.local/state/rdp-tui/rdp-tui.log`. Use `S` in the launcher to see
+its location, or inspect the latest output with `tail -n 100 ~/.local/state/rdp-tui/rdp-tui.log`.
+
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.

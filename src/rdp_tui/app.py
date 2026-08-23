@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import curses
+import logging
 import subprocess
 from dataclasses import replace
 
-from .profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles
+from .logging_utils import LOG_PATH, configure_logging
+from .profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles, validate_profile
 from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
 
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
 FORM_FIELDS = (*EDITABLE, "password_backend", "password")
+LOGGER = logging.getLogger("rdp_tui")
 
 
 def prompt(screen: curses.window, label: str, default: str = "") -> str | None:
@@ -116,7 +119,8 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
         elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
             selected = (selected + 1) % len(FORM_FIELDS)
         elif key in (ord("a"), ord("A")):
-            if value.name and value.host:
+            problems = validate_profile(value)
+            if not problems:
                 if pending_password is not None:
                     try:
                         if pending_password:
@@ -127,7 +131,7 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
                         error = f"Could not update saved password: {exc}"
                         continue
                 return value
-            error = "Profile name and host are required before accepting."
+            error = " · ".join(problems)
         elif key in (ord(" "), 10, 13, curses.KEY_ENTER, ord("e"), ord("E")):
             if field_name == "password_backend":
                 choices = ("automatic", "encrypted_file", "keyring")
@@ -182,7 +186,12 @@ def draw(screen: curses.window, profiles: list[Profile], selected: int, message:
 def run(screen: curses.window) -> None:
     screen.keypad(True)
     curses.curs_set(0)
-    profiles = load_profiles()
+    try:
+        profiles = load_profiles()
+    except ValueError as exc:
+        LOGGER.exception("Could not load profiles")
+        raise SystemExit(f"rdp-tui: {exc}") from exc
+    LOGGER.info("Launcher started with %d profile(s)", len(profiles))
     selected, message, last_result = 0, "Passwords are never stored; FreeRDP will request them.", ""
     while True:
         selected = max(0, min(selected, len(profiles) - 1))
@@ -200,45 +209,69 @@ def run(screen: curses.window) -> None:
             if profile:
                 profiles.append(profile)
                 save_profiles(profiles)
+                LOGGER.info("Created profile name=%r host=%r", profile.name, profile.host)
                 selected = len(profiles) - 1
         elif key == ord("e") and profiles:
             profile = edit_profile(screen, profiles[selected])
             if profile:
                 profiles[selected] = profile
                 save_profiles(profiles)
+                LOGGER.info("Updated profile name=%r host=%r", profile.name, profile.host)
         elif key == ord("d") and profiles:
             name = profiles[selected].name
             if prompt(screen, f"Delete {name}? Type yes", "no").lower() == "yes":
                 profiles.pop(selected)
                 save_profiles(profiles)
+                LOGGER.info("Deleted profile name=%r", name)
         elif key == ord("s"):
             client = freerdp_client()
             if client:
-                message = f"Status: {client} ready · {len(profiles)} profile(s) · config: ~/.config/rdp-tui/profiles.json"
+                message = f"Status: {client} ready · {len(profiles)} profile(s) · log: {LOG_PATH}"
             else:
                 message = "Status: FreeRDP unavailable. Install the freerdp package and try again."
         elif key in (10, 13, curses.KEY_ENTER) and profiles:
             client = freerdp_client()
             if client is None:
                 message = "FreeRDP is not installed or not on PATH (tried xfreerdp3, xfreerdp)."
+                LOGGER.error("Launch blocked: no FreeRDP client")
+                continue
+            problems = validate_profile(profiles[selected])
+            if problems:
+                message = "Launch blocked: " + " · ".join(problems)
+                LOGGER.error("Launch blocked for profile=%r: %s", profiles[selected].name, "; ".join(problems))
                 continue
             command = command_for(profiles[selected], client)
             try:
                 password = password_for(profiles[selected].id, profiles[selected].password_backend)
             except SecretStoreError as exc:
                 message = f"Password store unavailable: {exc}"
+                LOGGER.exception("Password store failed for profile=%r", profiles[selected].name)
                 continue
             if password is not None:
                 command.append("/from-stdin:force")
             curses.endwin()
             try:
-                result = subprocess.run(command, input=password, text=True, check=False)
+                LOGGER.info("Launching profile name=%r host=%r client=%s saved_password=%s", profiles[selected].name,
+                            profiles[selected].host, client, password is not None)
+                with LOG_PATH.open("a", encoding="utf-8") as output:
+                    result = subprocess.run(command, input=f"{password}\n" if password is not None else None, text=True,
+                                            stdout=output, stderr=subprocess.STDOUT,
+                                            check=False)
                 last_result = f"{client} exited with code {result.returncode}."
+                if result.returncode:
+                    LOGGER.error("FreeRDP exited code=%d for profile=%r", result.returncode, profiles[selected].name)
+                else:
+                    LOGGER.info("FreeRDP completed successfully for profile=%r", profiles[selected].name)
+            except OSError as exc:
+                last_result = f"Could not start {client}: {exc}"
+                LOGGER.exception("FreeRDP process could not start")
             finally:
                 screen.refresh()
 
 
 def main() -> None:
+    global LOGGER
+    LOGGER = configure_logging()
     try:
         curses.wrapper(run)
     except ValueError as exc:
