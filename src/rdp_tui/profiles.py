@@ -96,7 +96,7 @@ def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution
     command.append(f"/d:{profile.domain}")
     if not profile.domain:
         # A local account should not wait for a Kerberos realm that is absent.
-        command.append("/auth-pkg-list:!kerberos")
+        command.append("/auth-pkg-list:none,ntlm")
     if profile.fullscreen:
         command.append("/f")
     if profile.clipboard:

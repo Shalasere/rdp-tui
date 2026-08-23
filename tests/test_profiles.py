@@ -27,7 +27,7 @@ class ProfileTests(unittest.TestCase):
     def test_empty_domain_is_explicit(self):
         command = command_for(Profile("LAN", "10.0.0.41"))
         self.assertIn("/d:", command)
-        self.assertIn("/auth-pkg-list:!kerberos", command)
+        self.assertIn("/auth-pkg-list:none,ntlm", command)
 
     @patch("rdp_tui.profiles.socket.gethostbyname", return_value="10.0.0.41")
     def test_resolves_mdns_to_ipv4(self, _lookup):
