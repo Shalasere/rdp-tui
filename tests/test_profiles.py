@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from rdp_tui.profiles import (Profile, command_for, freerdp_client, load_profiles, local_display_resolution, local_display_settings,
                               resolved_host, save_profiles, validate_profile)
-from rdp_tui.app import fullscreen_wayland_sdl_window, status_text
+from rdp_tui.app import fullscreen_wayland_sdl_window, profile_status_lines, status_text
 from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
 
 
@@ -103,6 +103,22 @@ class ProfileTests(unittest.TestCase):
     @patch("rdp_tui.app.freerdp_client", return_value="xfreerdp3")
     def test_status_reports_ready_client(self, _client):
         self.assertEqual(status_text(), "Status: Ready — xfreerdp3 detected.")
+
+    @patch("rdp_tui.app.local_display_settings", return_value=("1920x1080", 150))
+    @patch("rdp_tui.app.password_for", return_value="secret")
+    @patch("rdp_tui.app.resolved_backend", return_value="encrypted_file")
+    @patch("rdp_tui.app.freerdp_client", return_value="sdl-freerdp3")
+    def test_profile_status_shows_effective_connection_details(self, _client, _backend, _password, _display):
+        profile = Profile("LAN", "10.0.0.41", user="apple", renderer="wayland_sdl", admin_session=True,
+                          smart_sizing=True)
+        lines = profile_status_lines(profile, {"profile_id": profile.id, "exit_code": 0,
+                                               "elapsed_seconds": 1.2, "finished_at": "today"})
+        report = "\n".join(lines)
+        self.assertIn("sdl-freerdp3", report)
+        self.assertIn("1920x1080", report)
+        self.assertIn("console (/admin)", report)
+        self.assertIn("saved (encrypted file)", report)
+        self.assertIn("Last session: completed", report)
 
     @patch("rdp_tui.app.subprocess.run")
     def test_fullscreens_mapped_sdl_window_without_client_fullscreen(self, run):

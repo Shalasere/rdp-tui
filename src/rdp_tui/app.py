@@ -14,7 +14,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from .logging_utils import LOG_PATH, STATE_DIR, configure_logging
+from .logging_utils import LOG_PATH, STATE_DIR, configure_logging, load_last_session, save_last_session
 from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, RENDERERS, SCALE_FACTORS, Profile, command_for, local_display_settings,
                        freerdp_client, load_profiles, save_profiles, validate_profile)
 from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
@@ -286,6 +286,57 @@ def status_text(last_result: str = "") -> str:
     return f"Status: Ready — {client} detected."
 
 
+def profile_status_lines(profile: Profile | None, last_session: dict[str, object] | None = None) -> list[str]:
+    """Build a concise, credential-free status report for the selected profile."""
+    if profile is None:
+        return ["No profile selected."]
+    client = freerdp_client(profile.renderer)
+    resolution, desktop_scale = local_display_settings()
+    requested_resolution = profile.resolution or resolution or "FreeRDP default"
+    password_state = "not saved"
+    try:
+        password_state = f"saved ({resolved_backend(profile.password_backend).replace('_', ' ')})" if \
+            password_for(profile.id, profile.password_backend) is not None else "not saved"
+    except SecretStoreError:
+        password_state = "storage unavailable"
+    renderer = RENDERERS.get(profile.renderer, profile.renderer)
+    lines = [
+        f"Profile: {profile.name}",
+        f"Target: {profile.user + '@' if profile.user else ''}{profile.host}",
+        f"Client: {client or 'not installed'}  •  Renderer: {renderer}",
+        f"RDP size: {requested_resolution}" + (f"  •  Local scale: {desktop_scale}%" if desktop_scale else ""),
+        f"Session: {'console (/admin)' if profile.admin_session else 'new RDP desktop'}  •  Smart sizing: {'on' if profile.smart_sizing else 'off'}",
+        f"Password: {password_state}",
+    ]
+    if last_session and last_session.get("profile_id") == profile.id:
+        outcome = "completed" if last_session.get("exit_code") == 0 else "failed"
+        lines.append(
+            f"Last session: {outcome} (exit {last_session.get('exit_code', '?')}, "
+            f"{last_session.get('elapsed_seconds', '?')}s) at {last_session.get('finished_at', 'unknown time')}"
+        )
+    else:
+        lines.append("Last session: no recorded session for this profile")
+    lines.append(f"Log: {LOG_PATH}")
+    return lines
+
+
+def show_status(screen: curses.window, profile: Profile | None, last_session: dict[str, object]) -> None:
+    """Present connection details without leaving the TUI or exposing secrets."""
+    while True:
+        screen.erase()
+        height, width = screen.getmaxyx()
+        screen.addnstr(0, 0, "Connection status", width - 1, curses.A_BOLD)
+        for index, line in enumerate(profile_status_lines(profile, last_session)):
+            if index + 2 >= height - 1:
+                break
+            screen.addnstr(index + 2, 0, line, width - 1)
+        screen.addnstr(height - 1, 0, "[Enter/Esc/Q] Return", width - 1)
+        screen.refresh()
+        key = screen.getch()
+        if key in (10, 13, curses.KEY_ENTER, 27, ord("q"), ord("Q")):
+            return
+
+
 def draw(screen: curses.window, profiles: list[Profile], selected: int, message: str, last_result: str) -> None:
     screen.erase()
     height, width = screen.getmaxyx()
@@ -311,7 +362,7 @@ def run(screen: curses.window) -> None:
         LOGGER.exception("Could not load profiles")
         raise SystemExit(f"rdp-tui: {exc}") from exc
     LOGGER.info("Launcher started with %d profile(s)", len(profiles))
-    selected, message, last_result = 0, "Passwords are never stored; FreeRDP will request them.", ""
+    selected, message, last_result = 0, "Passwords are saved securely when you set one in the profile editor.", ""
     while True:
         selected = max(0, min(selected, len(profiles) - 1))
         draw(screen, profiles, selected, message, last_result)
@@ -343,11 +394,7 @@ def run(screen: curses.window) -> None:
                 save_profiles(profiles)
                 LOGGER.info("Deleted profile name=%r", name)
         elif key == ord("s"):
-            client = freerdp_client()
-            if client:
-                message = f"Status: {client} ready · {len(profiles)} profile(s) · log: {LOG_PATH}"
-            else:
-                message = "Status: FreeRDP unavailable. Install the freerdp package and try again."
+            show_status(screen, profiles[selected] if profiles else None, load_last_session())
         elif key in (10, 13, curses.KEY_ENTER) and profiles:
             profile = profiles[selected]
             client = freerdp_client(profile.renderer)
@@ -404,6 +451,16 @@ def run(screen: curses.window) -> None:
                         returncode = result.returncode
                 elapsed = time.monotonic() - started
                 last_result = f"{client} exited with code {returncode} after {elapsed:.1f}s."
+                save_last_session({
+                    "profile_id": profile.id,
+                    "profile_name": profile.name,
+                    "client": client,
+                    "renderer": profile.renderer,
+                    "requested_resolution": requested_resolution,
+                    "exit_code": returncode,
+                    "elapsed_seconds": round(elapsed, 1),
+                    "finished_at": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                })
                 if returncode:
                     LOGGER.error("FreeRDP exited code=%d after %.1fs for profile=%r", returncode, elapsed,
                                  profile.name)
@@ -411,6 +468,16 @@ def run(screen: curses.window) -> None:
                     LOGGER.info("FreeRDP completed after %.1fs for profile=%r", elapsed, profile.name)
             except OSError as exc:
                 last_result = f"Could not start {client}: {exc}"
+                save_last_session({
+                    "profile_id": profile.id,
+                    "profile_name": profile.name,
+                    "client": client,
+                    "renderer": profile.renderer,
+                    "requested_resolution": requested_resolution,
+                    "exit_code": "not started",
+                    "elapsed_seconds": 0,
+                    "finished_at": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                })
                 LOGGER.exception("FreeRDP process could not start")
             finally:
                 if askpass_path:

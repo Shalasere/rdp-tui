@@ -25,7 +25,7 @@ install the project with `python -m venv .venv && .venv/bin/pip install -e .`.
 On Arch, FreeRDP 3 provides `xfreerdp3`; older releases and some other
 distributions use `xfreerdp`. rdp-tui detects either, preferring `xfreerdp3`.
 
-Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect. The profile editor shows every field at once: select a row, press `Enter` to edit it (or `Space` to toggle an option), then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availability and the result of the last session; press `s` for a detailed status line. Press `q` to quit.
+Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect. The profile editor shows every field at once: select a row, press `Enter` to edit it (or `Space` to toggle an option), then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availability and the result of the last session; press `s` for the selected profile's detailed status screen. Press `q` to quit.
 
 Leave **Domain** empty for a local account; rdp-tui passes that as an explicit empty domain so FreeRDP does not request one. The **Password storage** row defaults to **Automatic**, like Remmina: it uses a currently running Secret Service keyring when available and otherwise chooses the encrypted file. It does not start a keyring just to check. Select **Saved password** to store or replace a password. The fallback is encrypted in `~/.config/rdp-tui/secrets.json`, with its owner-only key held in `~/.config/rdp-tui/.password-key`; neither is committed or shared.
 
@@ -46,7 +46,10 @@ not maintained as a second source of truth.
 rdp-tui validates required fields, ports, and quoted extra options before it
 launches FreeRDP. Activity and FreeRDP output are retained in the owner-only
 log at `~/.local/state/rdp-tui/rdp-tui.log`. Use `S` in the launcher to see
-its location, or inspect the latest output with `tail -n 100 ~/.local/state/rdp-tui/rdp-tui.log`.
+the selected connection's effective client, renderer, display mode, password
+storage state, and last outcome. A credential-free copy of that last outcome is
+kept in `~/.local/state/rdp-tui/last-session.json` so it survives a restart;
+inspect the raw output with `tail -n 100 ~/.local/state/rdp-tui/rdp-tui.log`.
 
 ## Advanced RDP settings
 
