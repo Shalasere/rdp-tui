@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import curses
+import json
 import shlex
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -13,13 +15,14 @@ from dataclasses import replace
 from pathlib import Path
 
 from .logging_utils import LOG_PATH, STATE_DIR, configure_logging
-from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, SCALE_FACTORS, Profile, command_for, local_display_settings,
+from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, RENDERERS, SCALE_FACTORS, Profile, command_for, local_display_settings,
                        freerdp_client, load_profiles, save_profiles, validate_profile)
 from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
 
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
 ADVANCED_FIELDS = ("resolution", "dynamic_resolution", "multimon", "span_monitors", "smart_sizing", "scale",
-                   "shared_folder", "microphone", "auto_reconnect", "network_type", "color_depth", "certificate_policy")
+                   "shared_folder", "microphone", "auto_reconnect", "network_type", "color_depth", "certificate_policy",
+                   "renderer")
 FORM_FIELDS = (*EDITABLE, "advanced", "password_backend", "password")
 LOGGER = logging.getLogger("rdp_tui")
 
@@ -93,11 +96,13 @@ def edit_advanced(screen: curses.window, value: Profile) -> None:
         "span_monitors": "Span monitors", "smart_sizing": "Smart sizing", "scale": "Display scale",
         "shared_folder": "Share folder", "microphone": "Redirect microphone", "auto_reconnect": "Auto reconnect",
         "network_type": "Network profile", "color_depth": "Colour depth", "certificate_policy": "Certificate policy",
+        "renderer": "RDP renderer",
     }
     selected, error = 0, ""
     cyclic = {
         "scale": tuple(sorted(SCALE_FACTORS)), "color_depth": tuple(sorted(COLOR_DEPTHS)),
         "network_type": tuple(sorted(NETWORK_TYPES)), "certificate_policy": ("default", "tofu", "ignore", "deny"),
+        "renderer": tuple(RENDERERS),
     }
     while True:
         screen.erase()
@@ -106,7 +111,8 @@ def edit_advanced(screen: curses.window, value: Profile) -> None:
         screen.addnstr(1, 0, "Only change a setting when you need it; defaults preserve simple FreeRDP behavior.", width - 1)
         for index, field_name in enumerate(ADVANCED_FIELDS):
             current = getattr(value, field_name)
-            rendered = "On" if current is True else "Off" if current is False else str(current or "Default")
+            rendered = ("On" if current is True else "Off" if current is False else
+                        RENDERERS.get(current, str(current or "Default")) if field_name == "renderer" else str(current or "Default"))
             screen.addnstr(index + 3, 0, f"{labels[field_name]:<22} {rendered}", width - 1,
                            curses.A_REVERSE if index == selected else 0)
         if error:
@@ -236,6 +242,40 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
                     error = ""
 
 
+def fullscreen_wayland_sdl_window(pid: int, timeout: float = 3.0) -> bool:
+    """Fullscreen a mapped SDL window without changing its client fullscreen state."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(["hyprctl", "clients", "-j"], text=True, capture_output=True,
+                                    check=False, timeout=1)
+            clients = json.loads(result.stdout)
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            LOGGER.exception("Could not inspect Hyprland clients for SDL process pid=%d", pid)
+            return False
+        if isinstance(clients, list):
+            window = next((item for item in clients if isinstance(item, dict) and item.get("pid") == pid), None)
+            address = window.get("address") if isinstance(window, dict) else None
+            if isinstance(address, str) and address:
+                # Hyprland 0.55 uses Lua dispatch. internal=2 fullscreen the
+                # compositor surface; client=0 keeps SDL windowed so RDP does
+                # not renegotiate to a logical Wayland size.
+                expression = (
+                    "hl.dsp.window.fullscreen_state({ internal = 2, client = 0, action = \"set\", "
+                    f"window = \"address:{address}\" }})"
+                )
+                dispatch = subprocess.run(["hyprctl", "dispatch", expression], text=True, capture_output=True,
+                                          check=False, timeout=1)
+                if dispatch.returncode == 0:
+                    LOGGER.info("Hyprland fullscreened SDL RDP window pid=%d address=%s", pid, address)
+                    return True
+                LOGGER.error("Hyprland fullscreen request failed for pid=%d: %s", pid, dispatch.stderr.strip())
+                return False
+        time.sleep(0.1)
+    LOGGER.warning("SDL RDP window pid=%d did not map within %.1fs; leaving it windowed", pid, timeout)
+    return False
+
+
 def status_text(last_result: str = "") -> str:
     """Describe whether a usable FreeRDP client is currently available."""
     client = freerdp_client()
@@ -309,22 +349,27 @@ def run(screen: curses.window) -> None:
             else:
                 message = "Status: FreeRDP unavailable. Install the freerdp package and try again."
         elif key in (10, 13, curses.KEY_ENTER) and profiles:
-            client = freerdp_client()
+            profile = profiles[selected]
+            client = freerdp_client(profile.renderer)
             if client is None:
-                message = "FreeRDP is not installed or not on PATH (tried xfreerdp3, xfreerdp)."
+                message = f"FreeRDP renderer {profile.renderer!r} is not installed."
                 LOGGER.error("Launch blocked: no FreeRDP client")
                 continue
-            problems = validate_profile(profiles[selected])
+            if profile.renderer == "wayland_sdl" and (not os.environ.get("WAYLAND_DISPLAY") or not shutil.which("hyprctl")):
+                message = "Wayland SDL renderer requires an active Wayland/Hyprland session."
+                LOGGER.error("Launch blocked: Wayland SDL requirements unavailable")
+                continue
+            problems = validate_profile(profile)
             if problems:
                 message = "Launch blocked: " + " · ".join(problems)
-                LOGGER.error("Launch blocked for profile=%r: %s", profiles[selected].name, "; ".join(problems))
+                LOGGER.error("Launch blocked for profile=%r: %s", profile.name, "; ".join(problems))
                 continue
             detected_resolution, detected_desktop_scale = "", 0
-            if not profiles[selected].resolution and not profiles[selected].multimon and not profiles[selected].span_monitors:
+            if not profile.resolution and not profile.multimon and not profile.span_monitors:
                 detected_resolution, detected_desktop_scale = local_display_settings()
-            command = command_for(profiles[selected], client, detected_resolution)
+            command = command_for(profile, client, detected_resolution)
             try:
-                password = password_for(profiles[selected].id, profiles[selected].password_backend)
+                password = password_for(profile.id, profile.password_backend)
             except SecretStoreError as exc:
                 message = f"Password store unavailable: {exc}"
                 LOGGER.exception("Password store failed for profile=%r", profiles[selected].name)
@@ -339,22 +384,31 @@ def run(screen: curses.window) -> None:
             try:
                 requested_resolution = profiles[selected].resolution or detected_resolution or "FreeRDP default"
                 requested_scale = profiles[selected].scale or detected_desktop_scale or 100
-                LOGGER.info("Launching profile name=%r host=%r client=%s saved_password=%s requested_resolution=%s desktop_scale=%s",
-                            profiles[selected].name, profiles[selected].host, client, password is not None,
+                LOGGER.info("Launching profile name=%r host=%r client=%s renderer=%s saved_password=%s requested_resolution=%s desktop_scale=%s",
+                            profile.name, profile.host, client, profile.renderer, password is not None,
                             requested_resolution, requested_scale)
                 LOGGER.info("FreeRDP command: %s", shlex.join(command))
                 started = time.monotonic()
                 with LOG_PATH.open("a", encoding="utf-8") as output:
-                    result = subprocess.run(command, stdin=subprocess.DEVNULL if password is not None else None,
-                                            stdout=output, stderr=subprocess.STDOUT, env=environment,
-                                            check=False)
+                    if profile.renderer == "wayland_sdl":
+                        process = subprocess.Popen(command, stdin=subprocess.DEVNULL if password is not None else None,
+                                                   stdout=output, stderr=subprocess.STDOUT, env=environment)
+                        LOGGER.info("Started SDL RDP process pid=%d; waiting for mapped Wayland window", process.pid)
+                        if profile.fullscreen:
+                            fullscreen_wayland_sdl_window(process.pid)
+                        returncode = process.wait()
+                    else:
+                        result = subprocess.run(command, stdin=subprocess.DEVNULL if password is not None else None,
+                                                stdout=output, stderr=subprocess.STDOUT, env=environment,
+                                                check=False)
+                        returncode = result.returncode
                 elapsed = time.monotonic() - started
-                last_result = f"{client} exited with code {result.returncode} after {elapsed:.1f}s."
-                if result.returncode:
-                    LOGGER.error("FreeRDP exited code=%d after %.1fs for profile=%r", result.returncode, elapsed,
-                                 profiles[selected].name)
+                last_result = f"{client} exited with code {returncode} after {elapsed:.1f}s."
+                if returncode:
+                    LOGGER.error("FreeRDP exited code=%d after %.1fs for profile=%r", returncode, elapsed,
+                                 profile.name)
                 else:
-                    LOGGER.info("FreeRDP completed after %.1fs for profile=%r", elapsed, profiles[selected].name)
+                    LOGGER.info("FreeRDP completed after %.1fs for profile=%r", elapsed, profile.name)
             except OSError as exc:
                 last_result = f"Could not start {client}: {exc}"
                 LOGGER.exception("FreeRDP process could not start")

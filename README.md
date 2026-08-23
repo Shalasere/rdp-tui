@@ -60,4 +60,11 @@ physical resolution at each launch. The stable X11 FreeRDP frontend is used even
 under Wayland; experimental native Wayland frontends are deliberately not selected
 automatically. The exact command is recorded in the log.
 
+The **RDP renderer** advanced setting defaults to **Stable X11**. **Wayland SDL
+(experimental)** starts `sdl-freerdp3` windowed at the detected physical RDP
+size, then asks Hyprland to fullscreen only the compositor surface. This avoids
+both XWayland's logical fullscreen size and SDL's known fullscreen monitor probe
+on wlroots compositors. It requires Wayland, Hyprland, and the Arch `freerdp`
+package. The log records the SDL PID, mapped window address, and fullscreen result.
+
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.

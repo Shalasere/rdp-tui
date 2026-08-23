@@ -15,6 +15,8 @@ from uuid import uuid4
 
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rdp-tui" / "profiles.json"
 CLIENT_CANDIDATES = ("xfreerdp3", "xfreerdp")
+SDL_CLIENT_CANDIDATES = ("sdl-freerdp3",)
+RENDERERS = {"x11": "Stable X11", "wayland_sdl": "Wayland SDL (experimental)"}
 NETWORK_TYPES = {"auto", "modem", "broadband", "broadband-low", "broadband-high", "wan", "lan"}
 CERTIFICATE_POLICIES = {"default", "tofu", "ignore", "deny"}
 COLOR_DEPTHS = {0, 8, 15, 16, 24, 32}
@@ -46,6 +48,7 @@ class Profile:
     network_type: str = "auto"
     color_depth: int = 0
     certificate_policy: str = "default"
+    renderer: str = "x11"
 
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> "Profile":
@@ -82,9 +85,10 @@ def save_profiles(profiles: list[Profile], path: Path = CONFIG_PATH) -> None:
     temporary.replace(path)
 
 
-def freerdp_client() -> str | None:
-    """Return the stable FreeRDP X11 client, preferring FreeRDP 3."""
-    return next((client for client in CLIENT_CANDIDATES if shutil.which(client)), None)
+def freerdp_client(renderer: str = "x11") -> str | None:
+    """Return the selected FreeRDP frontend when it is installed."""
+    candidates = SDL_CLIENT_CANDIDATES if renderer == "wayland_sdl" else CLIENT_CANDIDATES
+    return next((client for client in candidates if shutil.which(client)), None)
 
 
 def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution: str = "") -> list[str]:
@@ -97,7 +101,10 @@ def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution
     if not profile.domain:
         # A local account should not wait for a Kerberos realm that is absent.
         command.append("/auth-pkg-list:none,ntlm")
-    if profile.fullscreen:
+    # SDL is intentionally started windowed.  Hyprland is asked to fullscreen
+    # the mapped native Wayland window afterwards without telling the client it
+    # is fullscreen, so FreeRDP retains the physical /size.
+    if profile.fullscreen and profile.renderer != "wayland_sdl":
         command.append("/f")
     if profile.clipboard:
         command.append("+clipboard")
@@ -218,4 +225,6 @@ def validate_profile(profile: Profile) -> list[str]:
         errors.append("Colour depth must be 8, 15, 16, 24, or 32")
     if profile.scale not in SCALE_FACTORS:
         errors.append("Scale must be 100, 140, or 180")
+    if profile.renderer not in RENDERERS:
+        errors.append("RDP renderer is invalid")
     return errors

@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from rdp_tui.profiles import (Profile, command_for, freerdp_client, load_profiles, local_display_resolution, local_display_settings,
                               resolved_host, save_profiles, validate_profile)
-from rdp_tui.app import status_text
+from rdp_tui.app import fullscreen_wayland_sdl_window, status_text
 from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
 
 
@@ -46,6 +46,12 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIn("/scale-desktop:150", command)
         self.assertNotIn("/smart-sizing:1280x720", command)
 
+    def test_wayland_sdl_starts_windowed_at_detected_size(self):
+        profile = Profile("Display", "10.0.0.41", renderer="wayland_sdl")
+        command = command_for(profile, "sdl-freerdp3", detected_resolution="1920x1080")
+        self.assertIn("/size:1920x1080", command)
+        self.assertNotIn("/f", command)
+
     def test_migrates_null_storage_fields(self):
         profile = Profile.from_dict({"name": "Legacy", "host": "10.0.0.41", "id": None, "password_backend": None})
         self.assertIsInstance(profile.id, str)
@@ -56,6 +62,7 @@ class ProfileTests(unittest.TestCase):
         errors = validate_profile(profile)
         self.assertIn("Port must be between 1 and 65535", errors)
         self.assertTrue(any(error.startswith("Extra options are invalid") for error in errors))
+        self.assertIn("RDP renderer is invalid", validate_profile(Profile("Bad", "10.0.0.41", renderer="bad")))
 
     def test_builds_advanced_rdp_options(self):
         profile = Profile(
@@ -93,6 +100,19 @@ class ProfileTests(unittest.TestCase):
     @patch("rdp_tui.app.freerdp_client", return_value="xfreerdp3")
     def test_status_reports_ready_client(self, _client):
         self.assertEqual(status_text(), "Status: Ready — xfreerdp3 detected.")
+
+    @patch("rdp_tui.app.subprocess.run")
+    def test_fullscreens_mapped_sdl_window_without_client_fullscreen(self, run):
+        from types import SimpleNamespace
+
+        run.side_effect = [
+            SimpleNamespace(stdout='[{"pid": 42, "address": "0xabc"}]'),
+            SimpleNamespace(returncode=0, stderr=""),
+        ]
+        self.assertTrue(fullscreen_wayland_sdl_window(42))
+        expression = run.call_args_list[1].args[0][2]
+        self.assertIn("internal = 2, client = 0", expression)
+        self.assertIn("address:0xabc", expression)
 
     def test_encrypted_file_password_store(self):
         from pathlib import Path
