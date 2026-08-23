@@ -174,6 +174,8 @@ def validate_profile(profile: Profile) -> list[str]:
         errors.append("Dynamic resolution cannot be used with multi-monitor")
     if profile.span_monitors and profile.dynamic_resolution:
         errors.append("Dynamic resolution cannot be used with span monitors")
+    if profile.smart_sizing and profile.dynamic_resolution:
+        errors.append("Dynamic resolution cannot be used with smart sizing")
     if profile.shared_folder:
         folder = Path(profile.shared_folder).expanduser()
         if not folder.is_absolute() or not folder.is_dir():

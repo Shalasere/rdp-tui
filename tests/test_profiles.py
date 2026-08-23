@@ -58,6 +58,9 @@ class ProfileTests(unittest.TestCase):
         profile = Profile("Conflict", "10.0.0.41", dynamic_resolution=True, multimon=True)
         self.assertIn("Dynamic resolution cannot be used with multi-monitor", validate_profile(profile))
 
+        profile = Profile("Conflict", "10.0.0.41", dynamic_resolution=True, smart_sizing=True)
+        self.assertIn("Dynamic resolution cannot be used with smart sizing", validate_profile(profile))
+
     def test_builds_folder_and_multimon_options(self):
         from tempfile import TemporaryDirectory
 
