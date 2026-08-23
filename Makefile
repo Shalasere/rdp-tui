@@ -9,4 +9,4 @@ test:
 	.venv/bin/python -m unittest discover -s tests -v
 
 run:
-	./rdp-tui
+	.venv/bin/rdp-tui
