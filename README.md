@@ -25,7 +25,7 @@ install the project with `python -m venv .venv && .venv/bin/pip install -e .`.
 On Arch, FreeRDP 3 provides `xfreerdp3`; older releases and some other
 distributions use `xfreerdp`. rdp-tui detects either, preferring `xfreerdp3`.
 
-Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect.
+Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect. The footer shows FreeRDP availability and the result of the last session; press `s` for a detailed status line. Press `q` to quit.
 
 ## Development
 

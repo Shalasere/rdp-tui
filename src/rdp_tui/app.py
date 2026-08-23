@@ -61,19 +61,29 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
     return value
 
 
-def draw(screen: curses.window, profiles: list[Profile], selected: int, message: str) -> None:
+def status_text(last_result: str = "") -> str:
+    """Describe whether a usable FreeRDP client is currently available."""
+    client = freerdp_client()
+    if client is None:
+        return "Status: FreeRDP unavailable — install freerdp (xfreerdp3 or xfreerdp not found)."
+    if last_result:
+        return f"Status: {last_result}"
+    return f"Status: Ready — {client} detected."
+
+
+def draw(screen: curses.window, profiles: list[Profile], selected: int, message: str, last_result: str) -> None:
     screen.erase()
     height, width = screen.getmaxyx()
     screen.addnstr(0, 0, "rdp-tui  •  FreeRDP profile launcher", width - 1, curses.A_BOLD)
-    screen.addnstr(1, 0, "Enter connect  a add  e edit  d delete  q quit", width - 1)
+    screen.addnstr(1, 0, "[Enter] Connect  [A] Add  [E] Edit  [D] Delete  [S] Status  [Q] Quit", width - 1)
     if not profiles:
         screen.addnstr(4, 0, "No profiles yet. Press a to add one.", width - 1)
     for index, profile in enumerate(profiles):
         marker = "> " if index == selected else "  "
         detail = f"{profile.name:<22} {profile.user + '@' if profile.user else ''}{profile.host}"
         screen.addnstr(index + 4, 0, marker + detail, width - 1, curses.A_REVERSE if index == selected else 0)
-    if message:
-        screen.addnstr(height - 1, 0, message, width - 1)
+    footer = message or status_text(last_result)
+    screen.addnstr(height - 1, 0, footer, width - 1)
     screen.refresh()
 
 
@@ -81,10 +91,10 @@ def run(screen: curses.window) -> None:
     screen.keypad(True)
     curses.curs_set(0)
     profiles = load_profiles()
-    selected, message = 0, "Passwords are never stored; FreeRDP will request them."
+    selected, message, last_result = 0, "Passwords are never stored; FreeRDP will request them.", ""
     while True:
         selected = max(0, min(selected, len(profiles) - 1))
-        draw(screen, profiles, selected, message)
+        draw(screen, profiles, selected, message, last_result)
         key = screen.getch()
         message = ""
         if key in (ord("q"), 27):
@@ -109,6 +119,12 @@ def run(screen: curses.window) -> None:
             if prompt(screen, f"Delete {name}? Type yes", "no").lower() == "yes":
                 profiles.pop(selected)
                 save_profiles(profiles)
+        elif key == ord("s"):
+            client = freerdp_client()
+            if client:
+                message = f"Status: {client} ready · {len(profiles)} profile(s) · config: ~/.config/rdp-tui/profiles.json"
+            else:
+                message = "Status: FreeRDP unavailable. Install the freerdp package and try again."
         elif key in (10, 13, curses.KEY_ENTER) and profiles:
             client = freerdp_client()
             if client is None:
@@ -117,7 +133,8 @@ def run(screen: curses.window) -> None:
             command = command_for(profiles[selected], client)
             curses.endwin()
             try:
-                subprocess.run(command, check=False)
+                result = subprocess.run(command, check=False)
+                last_result = f"{client} exited with code {result.returncode}."
             finally:
                 screen.refresh()
 

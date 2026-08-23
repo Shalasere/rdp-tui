@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from rdp_tui.profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles
+from rdp_tui.app import status_text
 
 
 class ProfileTests(unittest.TestCase):
@@ -25,3 +26,7 @@ class ProfileTests(unittest.TestCase):
     def test_prefers_freerdp3(self, which):
         which.side_effect = lambda executable: "/usr/bin/xfreerdp3" if executable == "xfreerdp3" else None
         self.assertEqual(freerdp_client(), "xfreerdp3")
+
+    @patch("rdp_tui.app.freerdp_client", return_value="xfreerdp3")
+    def test_status_reports_ready_client(self, _client):
+        self.assertEqual(status_text(), "Status: Ready — xfreerdp3 detected.")
