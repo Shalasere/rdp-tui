@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import socket
+import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import re
@@ -86,7 +87,7 @@ def freerdp_client() -> str | None:
     return next((client for client in CLIENT_CANDIDATES if shutil.which(client)), None)
 
 
-def command_for(profile: Profile, client: str = "xfreerdp3") -> list[str]:
+def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution: str = "") -> list[str]:
     command = [client, f"/v:{resolved_host(profile.host)}"]
     if profile.user:
         command.append(f"/u:{profile.user}")
@@ -106,8 +107,9 @@ def command_for(profile: Profile, client: str = "xfreerdp3") -> list[str]:
         command.append("/cert:ignore")
     elif profile.certificate_policy != "default":
         command.append(f"/cert:{profile.certificate_policy}")
-    if profile.resolution:
-        command.append(f"/size:{profile.resolution}")
+    resolution = profile.resolution or detected_resolution
+    if resolution:
+        command.append(f"/size:{resolution}")
     if profile.dynamic_resolution:
         command.append("+dynamic-resolution")
     if profile.span_monitors:
@@ -131,6 +133,26 @@ def command_for(profile: Profile, client: str = "xfreerdp3") -> list[str]:
     if profile.extra_options:
         command.extend(shlex.split(profile.extra_options))
     return command
+
+
+def local_display_resolution() -> str:
+    """Return the focused Hyprland monitor size, or an empty value if unknown."""
+    if not shutil.which("hyprctl"):
+        return ""
+    try:
+        result = subprocess.run(["hyprctl", "monitors", "-j"], text=True, capture_output=True, check=False, timeout=2)
+        monitors = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return ""
+    if not isinstance(monitors, list):
+        return ""
+    focused = next((monitor for monitor in monitors if isinstance(monitor, dict) and monitor.get("focused")), None)
+    if not isinstance(focused, dict):
+        return ""
+    width, height = focused.get("width"), focused.get("height")
+    if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+        return f"{width}x{height}"
+    return ""
 
 
 def resolved_host(host: str) -> str:

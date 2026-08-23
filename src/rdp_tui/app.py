@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .logging_utils import LOG_PATH, STATE_DIR, configure_logging
-from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, SCALE_FACTORS, Profile, command_for,
+from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, SCALE_FACTORS, Profile, command_for, local_display_resolution,
                        freerdp_client, load_profiles, save_profiles, validate_profile)
 from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
 
@@ -318,7 +318,10 @@ def run(screen: curses.window) -> None:
                 message = "Launch blocked: " + " · ".join(problems)
                 LOGGER.error("Launch blocked for profile=%r: %s", profiles[selected].name, "; ".join(problems))
                 continue
-            command = command_for(profiles[selected], client)
+            detected_resolution = ""
+            if not profiles[selected].resolution and not profiles[selected].multimon and not profiles[selected].span_monitors:
+                detected_resolution = local_display_resolution()
+            command = command_for(profiles[selected], client, detected_resolution)
             try:
                 password = password_for(profiles[selected].id, profiles[selected].password_backend)
             except SecretStoreError as exc:
@@ -333,8 +336,10 @@ def run(screen: curses.window) -> None:
             curses.def_prog_mode()
             curses.endwin()
             try:
-                LOGGER.info("Launching profile name=%r host=%r client=%s saved_password=%s", profiles[selected].name,
-                            profiles[selected].host, client, password is not None)
+                requested_resolution = profiles[selected].resolution or detected_resolution or "FreeRDP default"
+                LOGGER.info("Launching profile name=%r host=%r client=%s saved_password=%s requested_resolution=%s",
+                            profiles[selected].name, profiles[selected].host, client, password is not None,
+                            requested_resolution)
                 started = time.monotonic()
                 with LOG_PATH.open("a", encoding="utf-8") as output:
                     result = subprocess.run(command, stdin=subprocess.DEVNULL if password is not None else None,

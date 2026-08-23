@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from rdp_tui.profiles import Profile, command_for, freerdp_client, load_profiles, resolved_host, save_profiles, validate_profile
+from rdp_tui.profiles import (Profile, command_for, freerdp_client, load_profiles, local_display_resolution,
+                              resolved_host, save_profiles, validate_profile)
 from rdp_tui.app import status_text
 from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
 
@@ -31,6 +32,16 @@ class ProfileTests(unittest.TestCase):
     @patch("rdp_tui.profiles.socket.gethostbyname", return_value="10.0.0.41")
     def test_resolves_mdns_to_ipv4(self, _lookup):
         self.assertEqual(resolved_host("compono.local"), "10.0.0.41")
+
+    @patch("rdp_tui.profiles.subprocess.run")
+    @patch("rdp_tui.profiles.shutil.which", return_value="/usr/bin/hyprctl")
+    def test_detects_focused_hyprland_resolution(self, _which, run):
+        run.return_value.stdout = '[{"focused": false, "width": 2560, "height": 1440}, {"focused": true, "width": 1920, "height": 1080}]'
+        self.assertEqual(local_display_resolution(), "1920x1080")
+
+    def test_uses_detected_resolution_when_profile_has_none(self):
+        command = command_for(Profile("Display", "10.0.0.41"), detected_resolution="1920x1080")
+        self.assertIn("/size:1920x1080", command)
 
     def test_migrates_null_storage_fields(self):
         profile = Profile.from_dict({"name": "Legacy", "host": "10.0.0.41", "id": None, "password_backend": None})

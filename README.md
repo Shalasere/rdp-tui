@@ -55,5 +55,7 @@ settings** only when needed to configure custom or dynamic resolution,
 multi-monitor/span mode, smart sizing, display scale, an existing local folder
 share, microphone redirection, automatic reconnect, a network profile, colour
 depth, or certificate policy. These map directly to documented FreeRDP options.
+When no explicit resolution is set, rdp-tui uses the focused Hyprland monitor's
+resolution as the initial RDP size and records that requested size in its log.
 
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.
