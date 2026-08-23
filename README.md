@@ -83,3 +83,11 @@ once with the stable X11 frontend and records that recovery in the status and lo
 the existing server console session instead of a separate RDP desktop.
 
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.
+
+## RDP gateways
+
+Set **Gateway host**, **Gateway user**, and **Gateway domain** in **Advanced RDP
+settings** for an RD Gateway. The regular profile password and **Saved gateway
+password** are stored separately. Neither is placed in the command line,
+profile JSON, exported `.rdp` file, or log. The launcher preflights the gateway
+on HTTPS port 443 by default (or the port included in its host field).

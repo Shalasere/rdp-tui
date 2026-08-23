@@ -16,7 +16,7 @@ real connection problem makes a later item more urgent.
 
 ## Next
 
-- [ ] RDP gateway support, including validation and a separate saved gateway password
+- [x] RDP gateway support, including validation and a separate saved gateway password
 - [ ] Optional SSH tunnel support for RDP hosts not directly reachable
 - [ ] Per-profile keyboard/layout and performance controls (wallpaper, animations, font smoothing)
 - [ ] Redirected printers, serial devices, and selected local drives

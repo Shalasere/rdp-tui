@@ -50,6 +50,9 @@ class Profile:
     certificate_policy: str = "default"
     renderer: str = "x11"
     admin_session: bool = False
+    gateway_host: str = ""
+    gateway_user: str = ""
+    gateway_domain: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> "Profile":
@@ -120,6 +123,13 @@ def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution
         command.append(f"/size:{resolution}")
     if profile.admin_session:
         command.append("/admin")
+    if profile.gateway_host:
+        gateway = [f"g:{profile.gateway_host}"]
+        if profile.gateway_user:
+            gateway.append(f"u:{profile.gateway_user}")
+        if profile.gateway_domain:
+            gateway.append(f"d:{profile.gateway_domain}")
+        command.append("/gateway:" + ",".join(gateway))
     if profile.dynamic_resolution:
         command.append("+dynamic-resolution")
     if profile.span_monitors:
@@ -233,4 +243,9 @@ def validate_profile(profile: Profile) -> list[str]:
         errors.append("Scale must be 100, 140, or 180")
     if profile.renderer not in RENDERERS:
         errors.append("RDP renderer is invalid")
+    if profile.gateway_host:
+        if any(character.isspace() for character in profile.gateway_host) or "," in profile.gateway_host:
+            errors.append("Gateway host cannot contain whitespace or a comma")
+        if any("," in value for value in (profile.gateway_user, profile.gateway_domain)):
+            errors.append("Gateway user and domain cannot contain commas")
     return errors

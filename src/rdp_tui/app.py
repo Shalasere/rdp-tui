@@ -25,8 +25,8 @@ from .secrets import SecretStoreError, delete_password, password_for, resolved_b
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
 ADVANCED_FIELDS = ("resolution", "dynamic_resolution", "multimon", "span_monitors", "smart_sizing", "scale",
                    "shared_folder", "microphone", "auto_reconnect", "network_type", "color_depth", "certificate_policy",
-                   "renderer", "admin_session")
-FORM_FIELDS = (*EDITABLE, "advanced", "password_backend", "password")
+                   "renderer", "admin_session", "gateway_host", "gateway_user", "gateway_domain")
+FORM_FIELDS = (*EDITABLE, "advanced", "password_backend", "password", "gateway_password")
 LOGGER = logging.getLogger("rdp_tui")
 
 
@@ -35,7 +35,7 @@ def askpass_helper() -> str:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     descriptor, path = tempfile.mkstemp(prefix="askpass-", suffix=".sh", dir=STATE_DIR, text=True)
     with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-        file.write("#!/usr/bin/env sh\nprintf '%s' \"$RDP_TUI_PASSWORD\"\n")
+        file.write("#!/usr/bin/env sh\ncase \"$*\" in\n  *GatewayPassword:*|*Gateway\\ Password:*) printf '%s' \"$RDP_TUI_GATEWAY_PASSWORD\" ;;\n  *) printf '%s' \"$RDP_TUI_PASSWORD\" ;;\nesac\n")
     os.chmod(path, 0o700)
     return path
 
@@ -100,6 +100,7 @@ def edit_advanced(screen: curses.window, value: Profile) -> None:
         "shared_folder": "Share folder", "microphone": "Redirect microphone", "auto_reconnect": "Auto reconnect",
         "network_type": "Network profile", "color_depth": "Colour depth", "certificate_policy": "Certificate policy",
         "renderer": "RDP renderer", "admin_session": "Use console session",
+        "gateway_host": "Gateway host", "gateway_user": "Gateway user", "gateway_domain": "Gateway domain",
     }
     selected, error = 0, ""
     cyclic = {
@@ -161,12 +162,14 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
         "advanced": "Advanced RDP settings",
         "password_backend": "Password storage",
         "password": "Saved password",
+        "gateway_password": "Saved gateway password",
     }
     try:
         saved_password = password_for(value.id, value.password_backend) is not None
+        saved_gateway_password = password_for(f"{value.id}:gateway", value.password_backend) is not None
     except SecretStoreError:
         saved_password = False
-    selected, error, pending_password = 0, "", None
+    selected, error, pending_password, pending_gateway_password = 0, "", None, None
     screen.keypad(True)
     while True:
         screen.erase()
@@ -176,6 +179,8 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
         for index, field_name in enumerate(FORM_FIELDS):
             if field_name == "password":
                 current = "Saved" if saved_password else "Not saved"
+            elif field_name == "gateway_password":
+                current = "Saved" if saved_gateway_password else "Not saved"
             elif field_name == "advanced":
                 current = "Enter to configure"
             elif field_name == "password_backend":
@@ -197,7 +202,7 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
 
         key = screen.getch()
         field_name = FORM_FIELDS[selected]
-        current = getattr(value, field_name) if field_name not in {"advanced", "password", "password_backend"} else None
+        current = getattr(value, field_name) if field_name not in {"advanced", "password", "gateway_password", "password_backend"} else None
         if key in (ord("q"), ord("Q"), 27):
             return None
         if key in (curses.KEY_UP, ord("k"), ord("K")):
@@ -215,6 +220,15 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
                             delete_password(value.id, value.password_backend)
                     except SecretStoreError as exc:
                         error = f"Could not update saved password: {exc}"
+                        continue
+                if pending_gateway_password is not None:
+                    try:
+                        if pending_gateway_password:
+                            save_password(f"{value.id}:gateway", pending_gateway_password, value.password_backend)
+                        else:
+                            delete_password(f"{value.id}:gateway", value.password_backend)
+                    except SecretStoreError as exc:
+                        error = f"Could not update gateway password: {exc}"
                         continue
                 return value
             error = " · ".join(problems)
@@ -234,6 +248,15 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
                 if answer is not None:
                     pending_password = answer
                     saved_password = bool(answer)
+                    error = ""
+            elif field_name == "gateway_password":
+                if not value.gateway_host:
+                    error = "Set Gateway host in Advanced RDP settings first"
+                    continue
+                answer = password_prompt(screen)
+                if answer is not None:
+                    pending_gateway_password = answer
+                    saved_gateway_password = bool(answer)
                     error = ""
             elif isinstance(current, bool):
                 setattr(value, field_name, not current)
@@ -284,7 +307,7 @@ def should_fallback_to_x11(renderer: str, returncode: int, fullscreened: bool) -
     return renderer == "wayland_sdl" and returncode != 0 and not fullscreened
 
 
-def rdp_endpoint(host: str) -> tuple[str, int]:
+def rdp_endpoint(host: str, default_port: int = 3389) -> tuple[str, int]:
     """Split a supported RDP host[:port] value, retaining IPv6 literals."""
     if host.startswith("[") and "]:" in host:
         name, port = host[1:].split("]:", 1)
@@ -292,12 +315,12 @@ def rdp_endpoint(host: str) -> tuple[str, int]:
     name, separator, port = host.rpartition(":")
     if separator and name and host.count(":") == 1 and port.isdecimal():
         return name, int(port)
-    return host, 3389
+    return host, default_port
 
 
-def tcp_rdp_reachable(host: str, timeout: float = 1.5) -> tuple[bool, str]:
+def tcp_rdp_reachable(host: str, timeout: float = 1.5, default_port: int = 3389) -> tuple[bool, str]:
     """Check that a resolved target accepts a TCP connection on its RDP port."""
-    name, port = rdp_endpoint(resolved_host(host))
+    name, port = rdp_endpoint(resolved_host(host), default_port)
     try:
         addresses = socket.getaddrinfo(name, port, type=socket.SOCK_STREAM)
     except OSError as exc:
@@ -327,6 +350,10 @@ def preflight_profile(profile: Profile) -> list[str]:
         reachable, detail = tcp_rdp_reachable(profile.host)
         if not reachable:
             issues.append(f"RDP network check failed: {detail}")
+        if profile.gateway_host:
+            reachable, detail = tcp_rdp_reachable(profile.gateway_host, default_port=443)
+            if not reachable:
+                issues.append(f"Gateway network check failed: {detail}")
     return issues
 
 
@@ -353,6 +380,12 @@ def profile_status_lines(profile: Profile | None, last_session: dict[str, object
             password_for(profile.id, profile.password_backend) is not None else "not saved"
     except SecretStoreError:
         password_state = "storage unavailable"
+    gateway_state = "not configured"
+    if profile.gateway_host:
+        try:
+            gateway_state = "saved" if password_for(f"{profile.id}:gateway", profile.password_backend) is not None else "not saved"
+        except SecretStoreError:
+            gateway_state = "storage unavailable"
     renderer = RENDERERS.get(profile.renderer, profile.renderer)
     lines = [
         f"Profile: {profile.name}",
@@ -361,6 +394,7 @@ def profile_status_lines(profile: Profile | None, last_session: dict[str, object
         f"RDP size: {requested_resolution}" + (f"  •  Local scale: {desktop_scale}%" if desktop_scale else ""),
         f"Session: {'console (/admin)' if profile.admin_session else 'new RDP desktop'}  •  Smart sizing: {'on' if profile.smart_sizing else 'off'}",
         f"Password: {password_state}",
+        f"Gateway: {profile.gateway_host or 'none'}  •  Password: {gateway_state}",
     ]
     if last_session and last_session.get("profile_id") == profile.id:
         outcome = "completed" if last_session.get("exit_code") == 0 else "failed"
@@ -531,15 +565,17 @@ def run(screen: curses.window) -> None:
             command = command_for(profile, client, detected_resolution)
             try:
                 password = password_for(profile.id, profile.password_backend)
+                gateway_password = password_for(f"{profile.id}:gateway", profile.password_backend) if profile.gateway_host else None
             except SecretStoreError as exc:
                 message = f"Password store unavailable: {exc}"
                 LOGGER.exception("Password store failed for profile=%r", profile.name)
                 continue
             askpass_path = None
             environment = None
-            if password is not None:
+            if password is not None or gateway_password is not None:
                 askpass_path = askpass_helper()
-                environment = os.environ | {"FREERDP_ASKPASS": askpass_path, "RDP_TUI_PASSWORD": password}
+                environment = os.environ | {"FREERDP_ASKPASS": askpass_path, "RDP_TUI_PASSWORD": password or "",
+                                            "RDP_TUI_GATEWAY_PASSWORD": gateway_password or ""}
             curses.def_prog_mode()
             curses.endwin()
             try:

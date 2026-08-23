@@ -59,6 +59,14 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("-grab-keyboard", command)
         self.assertIn("-grab-mouse", command)
 
+    def test_builds_gateway_without_exposing_password(self):
+        profile = Profile("Gateway", "internal.example", gateway_host="gateway.example:8443",
+                          gateway_user="ada", gateway_domain="EXAMPLE")
+        command = command_for(profile)
+        self.assertIn("/gateway:g:gateway.example:8443,u:ada,d:EXAMPLE", command)
+        self.assertFalse(any("password" in option.lower() for option in command))
+        self.assertEqual(validate_profile(profile), [])
+
     def test_migrates_null_storage_fields(self):
         profile = Profile.from_dict({"name": "Legacy", "host": "10.0.0.41", "id": None, "password_backend": None})
         self.assertIsInstance(profile.id, str)
