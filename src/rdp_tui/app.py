@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import curses
+import shlex
 import logging
 import os
 import subprocess
@@ -12,7 +13,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from .logging_utils import LOG_PATH, STATE_DIR, configure_logging
-from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, SCALE_FACTORS, Profile, command_for, local_display_resolution,
+from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, SCALE_FACTORS, Profile, command_for, local_display_settings,
+                       logical_resolution_for,
                        freerdp_client, load_profiles, save_profiles, validate_profile)
 from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
 
@@ -318,10 +320,12 @@ def run(screen: curses.window) -> None:
                 message = "Launch blocked: " + " · ".join(problems)
                 LOGGER.error("Launch blocked for profile=%r: %s", profiles[selected].name, "; ".join(problems))
                 continue
-            detected_resolution = ""
+            detected_resolution, detected_desktop_scale, detected_window_resolution = "", 0, ""
             if not profiles[selected].resolution and not profiles[selected].multimon and not profiles[selected].span_monitors:
-                detected_resolution = local_display_resolution()
-            command = command_for(profiles[selected], client, detected_resolution)
+                detected_resolution, detected_desktop_scale = local_display_settings()
+                detected_window_resolution = logical_resolution_for(detected_resolution, detected_desktop_scale)
+            command = command_for(profiles[selected], client, detected_resolution, detected_desktop_scale,
+                                  detected_window_resolution)
             try:
                 password = password_for(profiles[selected].id, profiles[selected].password_backend)
             except SecretStoreError as exc:
@@ -337,9 +341,11 @@ def run(screen: curses.window) -> None:
             curses.endwin()
             try:
                 requested_resolution = profiles[selected].resolution or detected_resolution or "FreeRDP default"
-                LOGGER.info("Launching profile name=%r host=%r client=%s saved_password=%s requested_resolution=%s",
+                requested_scale = profiles[selected].scale or detected_desktop_scale or 100
+                LOGGER.info("Launching profile name=%r host=%r client=%s saved_password=%s requested_resolution=%s desktop_scale=%s",
                             profiles[selected].name, profiles[selected].host, client, password is not None,
-                            requested_resolution)
+                            requested_resolution, requested_scale)
+                LOGGER.info("FreeRDP command: %s", shlex.join(command))
                 started = time.monotonic()
                 with LOG_PATH.open("a", encoding="utf-8") as output:
                     result = subprocess.run(command, stdin=subprocess.DEVNULL if password is not None else None,

@@ -87,7 +87,8 @@ def freerdp_client() -> str | None:
     return next((client for client in CLIENT_CANDIDATES if shutil.which(client)), None)
 
 
-def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution: str = "") -> list[str]:
+def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution: str = "",
+                detected_desktop_scale: int = 0, detected_window_resolution: str = "") -> list[str]:
     command = [client, f"/v:{resolved_host(profile.host)}"]
     if profile.user:
         command.append(f"/u:{profile.user}")
@@ -116,10 +117,18 @@ def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution
         command.append("/span")
     elif profile.multimon:
         command.append("/multimon")
+    # On fractional-scale Wayland desktops, FreeRDP's X11 client otherwise
+    # replaces /size with the XWayland logical monitor size. Giving it that
+    # logical size as a smart-sizing target preserves the physical RDP desktop
+    # requested above while fitting it to the client window.
     if profile.smart_sizing:
         command.append("/smart-sizing")
+    elif detected_window_resolution and detected_window_resolution != resolution:
+        command.append(f"/smart-sizing:{detected_window_resolution}")
     if profile.scale:
         command.append(f"/scale:{profile.scale}")
+    elif detected_desktop_scale:
+        command.append(f"/scale-desktop:{detected_desktop_scale}")
     if profile.shared_folder:
         command.append(f"/drive:rdp-tui,{Path(profile.shared_folder).expanduser()}")
     if profile.microphone:
@@ -136,23 +145,40 @@ def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution
 
 
 def local_display_resolution() -> str:
-    """Return the focused Hyprland monitor size, or an empty value if unknown."""
-    if not shutil.which("hyprctl"):
+    """Return the focused Hyprland monitor's physical resolution."""
+    return local_display_settings()[0]
+
+
+def logical_resolution_for(resolution: str, desktop_scale: int) -> str:
+    """Return the XWayland logical size for a physical monitor resolution."""
+    if not resolution or desktop_scale <= 0 or desktop_scale == 100:
         return ""
+    try:
+        width, height = (int(value) for value in resolution.split("x", 1))
+    except ValueError:
+        return ""
+    return f"{round(width * 100 / desktop_scale)}x{round(height * 100 / desktop_scale)}"
+
+
+def local_display_settings() -> tuple[str, int]:
+    """Return focused Hyprland physical size and desktop scale percentage."""
+    if not shutil.which("hyprctl"):
+        return "", 0
     try:
         result = subprocess.run(["hyprctl", "monitors", "-j"], text=True, capture_output=True, check=False, timeout=2)
         monitors = json.loads(result.stdout)
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        return ""
+        return "", 0
     if not isinstance(monitors, list):
         return ""
     focused = next((monitor for monitor in monitors if isinstance(monitor, dict) and monitor.get("focused")), None)
     if not isinstance(focused, dict):
-        return ""
-    width, height = focused.get("width"), focused.get("height")
+        return "", 0
+    width, height, scale = focused.get("width"), focused.get("height"), focused.get("scale")
     if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
-        return f"{width}x{height}"
-    return ""
+        percentage = round(scale * 100) if isinstance(scale, (int, float)) and scale > 0 else 0
+        return f"{width}x{height}", percentage
+    return "", 0
 
 
 def resolved_host(host: str) -> str:
