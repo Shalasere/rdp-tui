@@ -91,9 +91,9 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(freerdp_client(), "xfreerdp3")
 
     @patch.dict("rdp_tui.profiles.os.environ", {"WAYLAND_DISPLAY": "wayland-1"}, clear=True)
-    @patch("rdp_tui.profiles.shutil.which", return_value="/usr/bin/sdl-freerdp3")
-    def test_prefers_sdl_freerdp_on_wayland(self, _which):
-        self.assertEqual(freerdp_client(), "sdl-freerdp3")
+    @patch("rdp_tui.profiles.shutil.which", return_value="/usr/bin/wlfreerdp3")
+    def test_prefers_wayland_freerdp_on_wayland(self, _which):
+        self.assertEqual(freerdp_client(), "wlfreerdp3")
 
     @patch("rdp_tui.app.freerdp_client", return_value="xfreerdp3")
     def test_status_reports_ready_client(self, _client):

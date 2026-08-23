@@ -15,7 +15,7 @@ from uuid import uuid4
 
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rdp-tui" / "profiles.json"
 CLIENT_CANDIDATES = ("xfreerdp3", "xfreerdp")
-WAYLAND_CLIENT_CANDIDATES = ("sdl-freerdp3",)
+WAYLAND_CLIENT_CANDIDATES = ("wlfreerdp3",)
 NETWORK_TYPES = {"auto", "modem", "broadband", "broadband-low", "broadband-high", "wan", "lan"}
 CERTIFICATE_POLICIES = {"default", "tofu", "ignore", "deny"}
 COLOR_DEPTHS = {0, 8, 15, 16, 24, 32}
@@ -87,8 +87,9 @@ def freerdp_client() -> str | None:
     """Return the best installed FreeRDP frontend for the active display server."""
     candidates = CLIENT_CANDIDATES
     if os.environ.get("WAYLAND_DISPLAY"):
-        # SDL3 obtains physical output dimensions and fractional scale directly
-        # from Wayland; xfreerdp only sees XWayland's logical fullscreen size.
+        # The native Wayland frontend obtains the physical output dimensions;
+        # xfreerdp only sees XWayland's logical fullscreen size. SDL3 is not
+        # used here because its current wlroots probe can report a 96x96 output.
         candidates = (*WAYLAND_CLIENT_CANDIDATES, *CLIENT_CANDIDATES)
     return next((client for client in candidates if shutil.which(client)), None)
 
