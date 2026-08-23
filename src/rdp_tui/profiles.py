@@ -15,6 +15,7 @@ from uuid import uuid4
 
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rdp-tui" / "profiles.json"
 CLIENT_CANDIDATES = ("xfreerdp3", "xfreerdp")
+WAYLAND_CLIENT_CANDIDATES = ("sdl-freerdp3",)
 NETWORK_TYPES = {"auto", "modem", "broadband", "broadband-low", "broadband-high", "wan", "lan"}
 CERTIFICATE_POLICIES = {"default", "tofu", "ignore", "deny"}
 COLOR_DEPTHS = {0, 8, 15, 16, 24, 32}
@@ -83,12 +84,16 @@ def save_profiles(profiles: list[Profile], path: Path = CONFIG_PATH) -> None:
 
 
 def freerdp_client() -> str | None:
-    """Return the installed FreeRDP X11 client, preferring FreeRDP 3."""
-    return next((client for client in CLIENT_CANDIDATES if shutil.which(client)), None)
+    """Return the best installed FreeRDP frontend for the active display server."""
+    candidates = CLIENT_CANDIDATES
+    if os.environ.get("WAYLAND_DISPLAY"):
+        # SDL3 obtains physical output dimensions and fractional scale directly
+        # from Wayland; xfreerdp only sees XWayland's logical fullscreen size.
+        candidates = (*WAYLAND_CLIENT_CANDIDATES, *CLIENT_CANDIDATES)
+    return next((client for client in candidates if shutil.which(client)), None)
 
 
-def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution: str = "",
-                detected_desktop_scale: int = 0, detected_window_resolution: str = "") -> list[str]:
+def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution: str = "") -> list[str]:
     command = [client, f"/v:{resolved_host(profile.host)}"]
     if profile.user:
         command.append(f"/u:{profile.user}")
@@ -117,18 +122,10 @@ def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution
         command.append("/span")
     elif profile.multimon:
         command.append("/multimon")
-    # On fractional-scale Wayland desktops, FreeRDP's X11 client otherwise
-    # replaces /size with the XWayland logical monitor size. Giving it that
-    # logical size as a smart-sizing target preserves the physical RDP desktop
-    # requested above while fitting it to the client window.
     if profile.smart_sizing:
         command.append("/smart-sizing")
-    elif detected_window_resolution and detected_window_resolution != resolution:
-        command.append(f"/smart-sizing:{detected_window_resolution}")
     if profile.scale:
         command.append(f"/scale:{profile.scale}")
-    elif detected_desktop_scale:
-        command.append(f"/scale-desktop:{detected_desktop_scale}")
     if profile.shared_folder:
         command.append(f"/drive:rdp-tui,{Path(profile.shared_folder).expanduser()}")
     if profile.microphone:
@@ -149,17 +146,6 @@ def local_display_resolution() -> str:
     return local_display_settings()[0]
 
 
-def logical_resolution_for(resolution: str, desktop_scale: int) -> str:
-    """Return the XWayland logical size for a physical monitor resolution."""
-    if not resolution or desktop_scale <= 0 or desktop_scale == 100:
-        return ""
-    try:
-        width, height = (int(value) for value in resolution.split("x", 1))
-    except ValueError:
-        return ""
-    return f"{round(width * 100 / desktop_scale)}x{round(height * 100 / desktop_scale)}"
-
-
 def local_display_settings() -> tuple[str, int]:
     """Return focused Hyprland physical size and desktop scale percentage."""
     if not shutil.which("hyprctl"):
@@ -170,7 +156,7 @@ def local_display_settings() -> tuple[str, int]:
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return "", 0
     if not isinstance(monitors, list):
-        return ""
+        return "", 0
     focused = next((monitor for monitor in monitors if isinstance(monitor, dict) and monitor.get("focused")), None)
     if not isinstance(focused, dict):
         return "", 0

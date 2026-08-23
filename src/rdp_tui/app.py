@@ -14,7 +14,6 @@ from pathlib import Path
 
 from .logging_utils import LOG_PATH, STATE_DIR, configure_logging
 from .profiles import (COLOR_DEPTHS, NETWORK_TYPES, SCALE_FACTORS, Profile, command_for, local_display_settings,
-                       logical_resolution_for,
                        freerdp_client, load_profiles, save_profiles, validate_profile)
 from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
 
@@ -241,7 +240,7 @@ def status_text(last_result: str = "") -> str:
     """Describe whether a usable FreeRDP client is currently available."""
     client = freerdp_client()
     if client is None:
-        return "Status: FreeRDP unavailable — install freerdp (xfreerdp3 or xfreerdp not found)."
+        return "Status: FreeRDP unavailable — install freerdp (sdl-freerdp3, xfreerdp3, or xfreerdp not found)."
     if last_result:
         return f"Status: {last_result}"
     return f"Status: Ready — {client} detected."
@@ -312,7 +311,7 @@ def run(screen: curses.window) -> None:
         elif key in (10, 13, curses.KEY_ENTER) and profiles:
             client = freerdp_client()
             if client is None:
-                message = "FreeRDP is not installed or not on PATH (tried xfreerdp3, xfreerdp)."
+                message = "FreeRDP is not installed or not on PATH (tried sdl-freerdp3, xfreerdp3, xfreerdp)."
                 LOGGER.error("Launch blocked: no FreeRDP client")
                 continue
             problems = validate_profile(profiles[selected])
@@ -320,12 +319,10 @@ def run(screen: curses.window) -> None:
                 message = "Launch blocked: " + " · ".join(problems)
                 LOGGER.error("Launch blocked for profile=%r: %s", profiles[selected].name, "; ".join(problems))
                 continue
-            detected_resolution, detected_desktop_scale, detected_window_resolution = "", 0, ""
+            detected_resolution, detected_desktop_scale = "", 0
             if not profiles[selected].resolution and not profiles[selected].multimon and not profiles[selected].span_monitors:
                 detected_resolution, detected_desktop_scale = local_display_settings()
-                detected_window_resolution = logical_resolution_for(detected_resolution, detected_desktop_scale)
-            command = command_for(profiles[selected], client, detected_resolution, detected_desktop_scale,
-                                  detected_window_resolution)
+            command = command_for(profiles[selected], client, detected_resolution)
             try:
                 password = password_for(profiles[selected].id, profiles[selected].password_backend)
             except SecretStoreError as exc:

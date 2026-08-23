@@ -2,7 +2,6 @@ import unittest
 from unittest.mock import patch
 
 from rdp_tui.profiles import (Profile, command_for, freerdp_client, load_profiles, local_display_resolution, local_display_settings,
-                              logical_resolution_for,
                               resolved_host, save_profiles, validate_profile)
 from rdp_tui.app import status_text
 from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
@@ -42,15 +41,10 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(local_display_settings(), ("1920x1080", 150))
 
     def test_uses_detected_resolution_when_profile_has_none(self):
-        command = command_for(Profile("Display", "10.0.0.41"), detected_resolution="1920x1080",
-                              detected_desktop_scale=150, detected_window_resolution="1280x720")
+        command = command_for(Profile("Display", "10.0.0.41"), detected_resolution="1920x1080")
         self.assertIn("/size:1920x1080", command)
-        self.assertIn("/scale-desktop:150", command)
-        self.assertIn("/smart-sizing:1280x720", command)
-
-    def test_derives_logical_size_from_fractional_scale(self):
-        self.assertEqual(logical_resolution_for("1920x1080", 150), "1280x720")
-        self.assertEqual(logical_resolution_for("1920x1080", 100), "")
+        self.assertNotIn("/scale-desktop:150", command)
+        self.assertNotIn("/smart-sizing:1280x720", command)
 
     def test_migrates_null_storage_fields(self):
         profile = Profile.from_dict({"name": "Legacy", "host": "10.0.0.41", "id": None, "password_backend": None})
@@ -95,6 +89,11 @@ class ProfileTests(unittest.TestCase):
     def test_prefers_freerdp3(self, which):
         which.side_effect = lambda executable: "/usr/bin/xfreerdp3" if executable == "xfreerdp3" else None
         self.assertEqual(freerdp_client(), "xfreerdp3")
+
+    @patch.dict("rdp_tui.profiles.os.environ", {"WAYLAND_DISPLAY": "wayland-1"}, clear=True)
+    @patch("rdp_tui.profiles.shutil.which", return_value="/usr/bin/sdl-freerdp3")
+    def test_prefers_sdl_freerdp_on_wayland(self, _which):
+        self.assertEqual(freerdp_client(), "sdl-freerdp3")
 
     @patch("rdp_tui.app.freerdp_client", return_value="xfreerdp3")
     def test_status_reports_ready_client(self, _client):
