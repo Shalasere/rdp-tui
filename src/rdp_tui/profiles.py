@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import socket
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -69,12 +70,15 @@ def freerdp_client() -> str | None:
 
 
 def command_for(profile: Profile, client: str = "xfreerdp3") -> list[str]:
-    command = [client, f"/v:{profile.host}"]
+    command = [client, f"/v:{resolved_host(profile.host)}"]
     if profile.user:
         command.append(f"/u:{profile.user}")
     # Explicitly pass an empty domain for local accounts so FreeRDP does not
     # prompt for one during credential collection.
     command.append(f"/d:{profile.domain}")
+    if not profile.domain:
+        # A local account should not wait for a Kerberos realm that is absent.
+        command.append("/auth-pkg-list:!kerberos")
     if profile.fullscreen:
         command.append("/f")
     if profile.clipboard:
@@ -86,6 +90,19 @@ def command_for(profile: Profile, client: str = "xfreerdp3") -> list[str]:
     if profile.extra_options:
         command.extend(shlex.split(profile.extra_options))
     return command
+
+
+def resolved_host(host: str) -> str:
+    """Resolve local mDNS names to IPv4 to avoid an IPv6 mDNS timeout."""
+    name, separator, port = host.rpartition(":")
+    hostname = name if separator and host.count(":") == 1 else host
+    suffix = f":{port}" if separator and host.count(":") == 1 else ""
+    if hostname.lower().endswith(".local"):
+        try:
+            return socket.gethostbyname(hostname) + suffix
+        except OSError:
+            pass
+    return host
 
 
 def validate_profile(profile: Profile) -> list[str]:

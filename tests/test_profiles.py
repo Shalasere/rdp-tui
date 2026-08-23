@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from rdp_tui.profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles, validate_profile
+from rdp_tui.profiles import Profile, command_for, freerdp_client, load_profiles, resolved_host, save_profiles, validate_profile
 from rdp_tui.app import status_text
 from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
 
@@ -24,7 +24,13 @@ class ProfileTests(unittest.TestCase):
         ])
 
     def test_empty_domain_is_explicit(self):
-        self.assertIn("/d:", command_for(Profile("LAN", "10.0.0.41")))
+        command = command_for(Profile("LAN", "10.0.0.41"))
+        self.assertIn("/d:", command)
+        self.assertIn("/auth-pkg-list:!kerberos", command)
+
+    @patch("rdp_tui.profiles.socket.gethostbyname", return_value="10.0.0.41")
+    def test_resolves_mdns_to_ipv4(self, _lookup):
+        self.assertEqual(resolved_host("compono.local"), "10.0.0.41")
 
     def test_migrates_null_storage_fields(self):
         profile = Profile.from_dict({"name": "Legacy", "host": "10.0.0.41", "id": None, "password_backend": None})

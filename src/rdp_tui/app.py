@@ -4,16 +4,30 @@ from __future__ import annotations
 
 import curses
 import logging
+import os
 import subprocess
+import tempfile
+import time
 from dataclasses import replace
+from pathlib import Path
 
-from .logging_utils import LOG_PATH, configure_logging
+from .logging_utils import LOG_PATH, STATE_DIR, configure_logging
 from .profiles import Profile, command_for, freerdp_client, load_profiles, save_profiles, validate_profile
 from .secrets import SecretStoreError, delete_password, password_for, resolved_backend, save_password
 
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
 FORM_FIELDS = (*EDITABLE, "password_backend", "password")
 LOGGER = logging.getLogger("rdp_tui")
+
+
+def askpass_helper() -> str:
+    """Create a short-lived helper used by FreeRDP to obtain a saved secret."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    descriptor, path = tempfile.mkstemp(prefix="askpass-", suffix=".sh", dir=STATE_DIR, text=True)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        file.write("#!/usr/bin/env sh\nprintf '%s' \"$RDP_TUI_PASSWORD\"\n")
+    os.chmod(path, 0o700)
+    return path
 
 
 def prompt(screen: curses.window, label: str, default: str = "") -> str | None:
@@ -247,25 +261,38 @@ def run(screen: curses.window) -> None:
                 message = f"Password store unavailable: {exc}"
                 LOGGER.exception("Password store failed for profile=%r", profiles[selected].name)
                 continue
+            askpass_path = None
+            environment = None
             if password is not None:
-                command.append("/from-stdin:force")
+                askpass_path = askpass_helper()
+                environment = os.environ | {"FREERDP_ASKPASS": askpass_path, "RDP_TUI_PASSWORD": password}
+            curses.def_prog_mode()
             curses.endwin()
             try:
                 LOGGER.info("Launching profile name=%r host=%r client=%s saved_password=%s", profiles[selected].name,
                             profiles[selected].host, client, password is not None)
+                started = time.monotonic()
                 with LOG_PATH.open("a", encoding="utf-8") as output:
-                    result = subprocess.run(command, input=f"{password}\n" if password is not None else None, text=True,
-                                            stdout=output, stderr=subprocess.STDOUT,
+                    result = subprocess.run(command, stdin=subprocess.DEVNULL if password is not None else None,
+                                            stdout=output, stderr=subprocess.STDOUT, env=environment,
                                             check=False)
-                last_result = f"{client} exited with code {result.returncode}."
+                elapsed = time.monotonic() - started
+                last_result = f"{client} exited with code {result.returncode} after {elapsed:.1f}s."
                 if result.returncode:
-                    LOGGER.error("FreeRDP exited code=%d for profile=%r", result.returncode, profiles[selected].name)
+                    LOGGER.error("FreeRDP exited code=%d after %.1fs for profile=%r", result.returncode, elapsed,
+                                 profiles[selected].name)
                 else:
-                    LOGGER.info("FreeRDP completed successfully for profile=%r", profiles[selected].name)
+                    LOGGER.info("FreeRDP completed after %.1fs for profile=%r", elapsed, profiles[selected].name)
             except OSError as exc:
                 last_result = f"Could not start {client}: {exc}"
                 LOGGER.exception("FreeRDP process could not start")
             finally:
+                if askpass_path:
+                    Path(askpass_path).unlink(missing_ok=True)
+                curses.reset_prog_mode()
+                curses.curs_set(0)
+                screen.keypad(True)
+                screen.erase()
                 screen.refresh()
 
 
