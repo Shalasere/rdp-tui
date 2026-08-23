@@ -53,6 +53,7 @@ class Profile:
     gateway_host: str = ""
     gateway_user: str = ""
     gateway_domain: str = ""
+    ssh_tunnel_host: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> "Profile":
@@ -248,4 +249,6 @@ def validate_profile(profile: Profile) -> list[str]:
             errors.append("Gateway host cannot contain whitespace or a comma")
         if any("," in value for value in (profile.gateway_user, profile.gateway_domain)):
             errors.append("Gateway user and domain cannot contain commas")
+    if profile.ssh_tunnel_host and any(character.isspace() for character in profile.ssh_tunnel_host):
+        errors.append("SSH tunnel host cannot contain whitespace")
     return errors

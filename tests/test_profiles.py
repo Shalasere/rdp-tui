@@ -67,6 +67,11 @@ class ProfileTests(unittest.TestCase):
         self.assertFalse(any("password" in option.lower() for option in command))
         self.assertEqual(validate_profile(profile), [])
 
+    def test_validates_ssh_tunnel_config_host(self):
+        self.assertEqual(validate_profile(Profile("Tunnel", "server", ssh_tunnel_host="jump-host")), [])
+        self.assertIn("SSH tunnel host cannot contain whitespace",
+                      validate_profile(Profile("Tunnel", "server", ssh_tunnel_host="bad host")))
+
     def test_migrates_null_storage_fields(self):
         profile = Profile.from_dict({"name": "Legacy", "host": "10.0.0.41", "id": None, "password_backend": None})
         self.assertIsInstance(profile.id, str)

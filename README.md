@@ -91,3 +91,11 @@ settings** for an RD Gateway. The regular profile password and **Saved gateway
 password** are stored separately. Neither is placed in the command line,
 profile JSON, exported `.rdp` file, or log. The launcher preflights the gateway
 on HTTPS port 443 by default (or the port included in its host field).
+
+## SSH tunnels
+
+**Advanced RDP settings → SSH tunnel** explains the connection path and lets
+you select an existing SSH config host (for example `work-jump`). It relies on
+`~/.ssh/config`, your SSH agent, and keys; no SSH password is collected or
+stored. The tunnel launcher itself is the next roadmap item, so this menu
+currently records the intended jump host only.

@@ -25,7 +25,7 @@ from .secrets import SecretStoreError, delete_password, password_for, resolved_b
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
 ADVANCED_FIELDS = ("resolution", "dynamic_resolution", "multimon", "span_monitors", "smart_sizing", "scale",
                    "shared_folder", "microphone", "auto_reconnect", "network_type", "color_depth", "certificate_policy",
-                   "renderer", "admin_session", "gateway_host", "gateway_user", "gateway_domain")
+                   "renderer", "admin_session", "gateway_host", "gateway_user", "gateway_domain", "ssh_tunnel")
 FORM_FIELDS = (*EDITABLE, "advanced", "password_backend", "password", "gateway_password")
 LOGGER = logging.getLogger("rdp_tui")
 
@@ -92,6 +92,34 @@ def password_prompt(screen: curses.window) -> str | None:
             response.append(key)
 
 
+def edit_ssh_tunnel(screen: curses.window, profile: Profile) -> None:
+    """Explain and configure an SSH-config-backed RDP tunnel without secrets."""
+    while True:
+        screen.erase()
+        height, width = screen.getmaxyx()
+        lines = (
+            "SSH tunnel for this RDP profile",
+            "",
+            "A tunnel forwards this RDP connection through an SSH jump host.",
+            "rdp-tui will use your existing ~/.ssh/config, keys, and agent.",
+            "It will not store an SSH password. Leave the host blank to disable it.",
+            "",
+            f"SSH config host: {profile.ssh_tunnel_host or 'Not configured'}",
+            "",
+            "[Enter/E] Set SSH config host  [A/Q/Esc] Return",
+        )
+        for index, line in enumerate(lines):
+            screen.addnstr(index, 0, line, width - 1, curses.A_BOLD if index == 0 else 0)
+        screen.refresh()
+        key = screen.getch()
+        if key in (ord("a"), ord("A"), ord("q"), ord("Q"), 27):
+            return
+        if key in (ord("e"), ord("E"), 10, 13, curses.KEY_ENTER):
+            answer = prompt(screen, "SSH config host (for example: work-jump)", profile.ssh_tunnel_host)
+            if answer is not None:
+                profile.ssh_tunnel_host = answer
+
+
 def edit_advanced(screen: curses.window, value: Profile) -> None:
     """Edit optional RDP settings without crowding the basic profile form."""
     labels = {
@@ -101,6 +129,7 @@ def edit_advanced(screen: curses.window, value: Profile) -> None:
         "network_type": "Network profile", "color_depth": "Colour depth", "certificate_policy": "Certificate policy",
         "renderer": "RDP renderer", "admin_session": "Use console session",
         "gateway_host": "Gateway host", "gateway_user": "Gateway user", "gateway_domain": "Gateway domain",
+        "ssh_tunnel": "SSH tunnel",
     }
     selected, error = 0, ""
     cyclic = {
@@ -114,9 +143,9 @@ def edit_advanced(screen: curses.window, value: Profile) -> None:
         screen.addnstr(0, 0, "Advanced RDP settings", width - 1, curses.A_BOLD)
         screen.addnstr(1, 0, "Only change a setting when you need it; defaults preserve simple FreeRDP behavior.", width - 1)
         for index, field_name in enumerate(ADVANCED_FIELDS):
-            current = getattr(value, field_name)
+            current = value.ssh_tunnel_host if field_name == "ssh_tunnel" else getattr(value, field_name)
             rendered = ("On" if current is True else "Off" if current is False else
-                        RENDERERS.get(current, str(current or "Default")) if field_name == "renderer" else str(current or "Default"))
+                        RENDERERS.get(current, str(current or "Default")) if field_name == "renderer" else str(current or "Disabled"))
             screen.addnstr(index + 3, 0, f"{labels[field_name]:<22} {rendered}", width - 1,
                            curses.A_REVERSE if index == selected else 0)
         if error:
@@ -125,7 +154,7 @@ def edit_advanced(screen: curses.window, value: Profile) -> None:
         screen.refresh()
         key = screen.getch()
         field_name = ADVANCED_FIELDS[selected]
-        current = getattr(value, field_name)
+        current = value.ssh_tunnel_host if field_name == "ssh_tunnel" else getattr(value, field_name)
         if key in (ord("q"), ord("Q"), 27):
             return
         if key in (curses.KEY_UP, ord("k"), ord("K")):
@@ -140,7 +169,9 @@ def edit_advanced(screen: curses.window, value: Profile) -> None:
             else:
                 return
         elif key in (ord(" "), 10, 13, curses.KEY_ENTER, ord("e"), ord("E")):
-            if isinstance(current, bool):
+            if field_name == "ssh_tunnel":
+                edit_ssh_tunnel(screen, value)
+            elif isinstance(current, bool):
                 setattr(value, field_name, not current)
             elif field_name in cyclic:
                 choices = cyclic[field_name]
