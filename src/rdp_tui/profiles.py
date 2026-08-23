@@ -49,6 +49,7 @@ class Profile:
     color_depth: int = 0
     certificate_policy: str = "default"
     renderer: str = "x11"
+    admin_session: bool = False
 
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> "Profile":
@@ -117,6 +118,8 @@ def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution
     resolution = profile.resolution or detected_resolution
     if resolution:
         command.append(f"/size:{resolution}")
+    if profile.admin_session:
+        command.append("/admin")
     if profile.dynamic_resolution:
         command.append("+dynamic-resolution")
     if profile.span_monitors:
@@ -127,6 +130,9 @@ def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution
         command.append("/smart-sizing")
     if profile.scale:
         command.append(f"/scale:{profile.scale}")
+    if profile.renderer == "wayland_sdl":
+        # Keep Hyprland shortcuts and touchpad gestures with the compositor.
+        command.extend(("-grab-keyboard", "-grab-mouse"))
     if profile.shared_folder:
         command.append(f"/drive:rdp-tui,{Path(profile.shared_folder).expanduser()}")
     if profile.microphone:

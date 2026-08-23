@@ -47,10 +47,13 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIn("/smart-sizing:1280x720", command)
 
     def test_wayland_sdl_starts_windowed_at_detected_size(self):
-        profile = Profile("Display", "10.0.0.41", renderer="wayland_sdl")
+        profile = Profile("Display", "10.0.0.41", renderer="wayland_sdl", admin_session=True)
         command = command_for(profile, "sdl-freerdp3", detected_resolution="1920x1080")
         self.assertIn("/size:1920x1080", command)
         self.assertNotIn("/f", command)
+        self.assertIn("/admin", command)
+        self.assertIn("-grab-keyboard", command)
+        self.assertIn("-grab-mouse", command)
 
     def test_migrates_null_storage_fields(self):
         profile = Profile.from_dict({"name": "Legacy", "host": "10.0.0.41", "id": None, "password_backend": None})

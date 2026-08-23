@@ -66,5 +66,8 @@ size, then asks Hyprland to fullscreen only the compositor surface. This avoids
 both XWayland's logical fullscreen size and SDL's known fullscreen monitor probe
 on wlroots compositors. It requires Wayland, Hyprland, and the Arch `freerdp`
 package. The log records the SDL PID, mapped window address, and fullscreen result.
+It also leaves keyboard and mouse input ungrabbed so compositor shortcuts and gestures
+remain available. **Use console session** adds FreeRDP's `/admin` option to request
+the existing server console session instead of a separate RDP desktop.
 
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.

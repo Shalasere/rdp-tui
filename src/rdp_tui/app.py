@@ -22,7 +22,7 @@ from .secrets import SecretStoreError, delete_password, password_for, resolved_b
 EDITABLE = ("name", "host", "user", "domain", "fullscreen", "clipboard", "audio", "ignore_certificate", "extra_options")
 ADVANCED_FIELDS = ("resolution", "dynamic_resolution", "multimon", "span_monitors", "smart_sizing", "scale",
                    "shared_folder", "microphone", "auto_reconnect", "network_type", "color_depth", "certificate_policy",
-                   "renderer")
+                   "renderer", "admin_session")
 FORM_FIELDS = (*EDITABLE, "advanced", "password_backend", "password")
 LOGGER = logging.getLogger("rdp_tui")
 
@@ -96,7 +96,7 @@ def edit_advanced(screen: curses.window, value: Profile) -> None:
         "span_monitors": "Span monitors", "smart_sizing": "Smart sizing", "scale": "Display scale",
         "shared_folder": "Share folder", "microphone": "Redirect microphone", "auto_reconnect": "Auto reconnect",
         "network_type": "Network profile", "color_depth": "Colour depth", "certificate_policy": "Certificate policy",
-        "renderer": "RDP renderer",
+        "renderer": "RDP renderer", "admin_session": "Use console session",
     }
     selected, error = 0, ""
     cyclic = {
