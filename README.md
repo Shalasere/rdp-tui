@@ -22,10 +22,8 @@ cd rdp-tui
 For an installed `rdp-tui` command instead, create a virtual environment and
 install the project with `python -m venv .venv && .venv/bin/pip install -e .`.
 
-On Arch, FreeRDP 3 provides `wlfreerdp3` and `xfreerdp3`; older releases and
-some other distributions use `xfreerdp`. In a Wayland session rdp-tui prefers
-the native Wayland frontend, which obtains physical output dimensions directly
-from Wayland. Elsewhere it prefers `xfreerdp3`.
+On Arch, FreeRDP 3 provides `xfreerdp3`; older releases and some other
+distributions use `xfreerdp`. rdp-tui detects either, preferring `xfreerdp3`.
 
 Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect. The profile editor shows every field at once: select a row, press `Enter` to edit it (or `Space` to toggle an option), then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availability and the result of the last session; press `s` for a detailed status line. Press `q` to quit.
 
@@ -58,9 +56,8 @@ multi-monitor/span mode, smart sizing, display scale, an existing local folder
 share, microphone redirection, automatic reconnect, a network profile, colour
 depth, or certificate policy. These map directly to documented FreeRDP options.
 When no explicit resolution is set, rdp-tui detects the focused Hyprland monitor's
-physical resolution at each launch. On Wayland it uses FreeRDP's native Wayland
-frontend so the frontend itself obtains the physical output dimensions and scale,
-instead of passing XWayland's logical dimensions back to the remote host. The exact
-safe command is recorded in the log.
+physical resolution at each launch. The stable X11 FreeRDP frontend is used even
+under Wayland; experimental native Wayland frontends are deliberately not selected
+automatically. The exact command is recorded in the log.
 
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.

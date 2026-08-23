@@ -240,7 +240,7 @@ def status_text(last_result: str = "") -> str:
     """Describe whether a usable FreeRDP client is currently available."""
     client = freerdp_client()
     if client is None:
-        return "Status: FreeRDP unavailable — install freerdp (wlfreerdp3, xfreerdp3, or xfreerdp not found)."
+        return "Status: FreeRDP unavailable — install freerdp (xfreerdp3 or xfreerdp not found)."
     if last_result:
         return f"Status: {last_result}"
     return f"Status: Ready — {client} detected."
@@ -311,7 +311,7 @@ def run(screen: curses.window) -> None:
         elif key in (10, 13, curses.KEY_ENTER) and profiles:
             client = freerdp_client()
             if client is None:
-                message = "FreeRDP is not installed or not on PATH (tried wlfreerdp3, xfreerdp3, xfreerdp)."
+                message = "FreeRDP is not installed or not on PATH (tried xfreerdp3, xfreerdp)."
                 LOGGER.error("Launch blocked: no FreeRDP client")
                 continue
             problems = validate_profile(profiles[selected])
