@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-import json
 from pathlib import Path
 
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "rdp-tui"

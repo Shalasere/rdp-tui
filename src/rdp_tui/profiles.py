@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import socket
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-import re
 from uuid import uuid4
 
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rdp-tui" / "profiles.json"
@@ -56,7 +56,7 @@ class Profile:
     ssh_tunnel_host: str = ""
 
     @classmethod
-    def from_dict(cls, value: dict[str, object]) -> "Profile":
+    def from_dict(cls, value: dict[str, object]) -> Profile:
         # Older profile files can contain null entries for fields added in newer
         # releases. Omit them so dataclass defaults migrate the profile safely.
         fields = {key: value[key] for key in cls.__dataclass_fields__ if value.get(key) is not None}

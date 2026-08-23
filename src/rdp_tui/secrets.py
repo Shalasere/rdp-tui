@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
+from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -47,7 +47,9 @@ def _load(secrets_path: Path) -> dict[str, str]:
         return {}
     except (OSError, json.JSONDecodeError) as exc:
         raise SecretStoreError(f"Could not read encrypted password store: {exc}") from exc
-    if not isinstance(data, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in data.items()):
+    if not isinstance(data, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in data.items()
+    ):
         raise SecretStoreError("Encrypted password store has an invalid format.")
     return data
 
@@ -65,7 +67,9 @@ def _file_password(profile_id: str, secrets_path: Path = SECRETS_PATH, key_path:
         raise SecretStoreError("Saved password could not be decrypted.") from exc
 
 
-def _save_file_password(profile_id: str, password: str, secrets_path: Path = SECRETS_PATH, key_path: Path = KEY_PATH) -> None:
+def _save_file_password(
+    profile_id: str, password: str, secrets_path: Path = SECRETS_PATH, key_path: Path = KEY_PATH
+) -> None:
     try:
         key = _key(key_path, create=True)
         assert key is not None

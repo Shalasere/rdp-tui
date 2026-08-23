@@ -35,15 +35,20 @@ def import_remmina(path: Path) -> list[Profile]:
     user, domain = _user_and_domain(section.get("username", ""), section.get("domain", ""))
     width, height = section.get("resolution_width", ""), section.get("resolution_height", "")
     resolution = f"{width}x{height}" if width.isdecimal() and height.isdecimal() else ""
-    return [Profile(
-        name=section.get("name", path.stem), host=host, user=user, domain=domain,
-        fullscreen=_as_bool(section.get("fullscreen", ""), True),
-        clipboard=not _as_bool(section.get("disableclipboard", "")),
-        audio=_as_bool(section.get("sound", "")),
-        ignore_certificate=_as_bool(section.get("cert_ignore", "")),
-        resolution=resolution,
-        multimon=_as_bool(section.get("multimon", "")),
-    )]
+    return [
+        Profile(
+            name=section.get("name", path.stem),
+            host=host,
+            user=user,
+            domain=domain,
+            fullscreen=_as_bool(section.get("fullscreen", ""), True),
+            clipboard=not _as_bool(section.get("disableclipboard", "")),
+            audio=_as_bool(section.get("sound", "")),
+            ignore_certificate=_as_bool(section.get("cert_ignore", "")),
+            resolution=resolution,
+            multimon=_as_bool(section.get("multimon", "")),
+        )
+    ]
 
 
 def import_rdp(path: Path) -> list[Profile]:
@@ -61,14 +66,19 @@ def import_rdp(path: Path) -> list[Profile]:
     user, domain = _user_and_domain(values.get("username", ""), values.get("domain", ""))
     width, height = values.get("desktopwidth", ""), values.get("desktopheight", "")
     resolution = f"{width}x{height}" if width.isdecimal() and height.isdecimal() else ""
-    return [Profile(
-        name=path.stem, host=host, user=user, domain=domain,
-        fullscreen=values.get("screen mode id", "2") == "2",
-        clipboard=values.get("redirectclipboard", "1") != "0",
-        audio=values.get("audiomode", "2") == "0",
-        resolution=resolution,
-        multimon=values.get("use multimon", "0") == "1",
-    )]
+    return [
+        Profile(
+            name=path.stem,
+            host=host,
+            user=user,
+            domain=domain,
+            fullscreen=values.get("screen mode id", "2") == "2",
+            clipboard=values.get("redirectclipboard", "1") != "0",
+            audio=values.get("audiomode", "2") == "0",
+            resolution=resolution,
+            multimon=values.get("use multimon", "0") == "1",
+        )
+    ]
 
 
 def import_profiles(path: Path) -> list[Profile]:

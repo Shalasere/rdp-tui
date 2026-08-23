@@ -17,6 +17,9 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
 ]
 
+[project.optional-dependencies]
+dev = ["ruff>=0.9"]
+
 [project.scripts]
 rdp-tui = "rdp_tui.app:main"
 
@@ -25,3 +28,10 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["F", "I", "UP"]

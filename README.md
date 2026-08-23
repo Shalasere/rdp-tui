@@ -39,6 +39,8 @@ Leave **Domain** empty for a local account; rdp-tui passes that as an explicit e
 ```sh
 make setup
 make test
+make lint
+make format-check
 make run
 ```
 

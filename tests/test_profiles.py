@@ -1,14 +1,30 @@
 import unittest
-from unittest.mock import patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from rdp_tui.profiles import (Profile, command_for, freerdp_client, load_profiles, local_display_resolution, local_display_settings,
-                              resolved_host, save_profiles, validate_profile)
-from rdp_tui.app import (filtered_profiles, fullscreen_wayland_sdl_window, preflight_profile, profile_status_lines,
-                         should_fallback_to_x11, status_text, tcp_rdp_reachable)
-from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
+from rdp_tui.app import (
+    filtered_profiles,
+    fullscreen_wayland_sdl_window,
+    preflight_profile,
+    profile_status_lines,
+    should_fallback_to_x11,
+    status_text,
+    tcp_rdp_reachable,
+)
 from rdp_tui.profile_io import export_rdp, import_profiles, merge_profiles
+from rdp_tui.profiles import (
+    Profile,
+    command_for,
+    freerdp_client,
+    load_profiles,
+    local_display_resolution,
+    local_display_settings,
+    resolved_host,
+    save_profiles,
+    validate_profile,
+)
+from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
 
 
 class ProfileTests(unittest.TestCase):
@@ -24,9 +40,18 @@ class ProfileTests(unittest.TestCase):
                 save_profiles([profile], path)
                 self.assertEqual(load_profiles(path), [profile])
 
-        self.assertEqual(command_for(profile, "xfreerdp3"), [
-            "xfreerdp3", "/v:rdp.example.test", "/u:ada", "/d:EXAMPLE", "/f", "+clipboard", "/sound",
-        ])
+        self.assertEqual(
+            command_for(profile, "xfreerdp3"),
+            [
+                "xfreerdp3",
+                "/v:rdp.example.test",
+                "/u:ada",
+                "/d:EXAMPLE",
+                "/f",
+                "+clipboard",
+                "/sound",
+            ],
+        )
 
     def test_empty_domain_is_explicit(self):
         command = command_for(Profile("LAN", "10.0.0.41"))
@@ -60,8 +85,13 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("-grab-mouse", command)
 
     def test_builds_gateway_without_exposing_password(self):
-        profile = Profile("Gateway", "internal.example", gateway_host="gateway.example:8443",
-                          gateway_user="ada", gateway_domain="EXAMPLE")
+        profile = Profile(
+            "Gateway",
+            "internal.example",
+            gateway_host="gateway.example:8443",
+            gateway_user="ada",
+            gateway_domain="EXAMPLE",
+        )
         command = command_for(profile)
         self.assertIn("/gateway:g:gateway.example:8443,u:ada,d:EXAMPLE", command)
         self.assertFalse(any("password" in option.lower() for option in command))
@@ -69,8 +99,10 @@ class ProfileTests(unittest.TestCase):
 
     def test_validates_ssh_tunnel_config_host(self):
         self.assertEqual(validate_profile(Profile("Tunnel", "server", ssh_tunnel_host="jump-host")), [])
-        self.assertIn("SSH tunnel host cannot contain whitespace",
-                      validate_profile(Profile("Tunnel", "server", ssh_tunnel_host="bad host")))
+        self.assertIn(
+            "SSH tunnel host cannot contain whitespace",
+            validate_profile(Profile("Tunnel", "server", ssh_tunnel_host="bad host")),
+        )
 
     def test_migrates_null_storage_fields(self):
         profile = Profile.from_dict({"name": "Legacy", "host": "10.0.0.41", "id": None, "password_backend": None})
@@ -86,13 +118,30 @@ class ProfileTests(unittest.TestCase):
 
     def test_builds_advanced_rdp_options(self):
         profile = Profile(
-            "Advanced", "10.0.0.41", resolution="1920x1080", dynamic_resolution=True,
-            smart_sizing=True, scale=140, microphone=True, auto_reconnect=True,
-            network_type="lan", color_depth=32, certificate_policy="tofu",
+            "Advanced",
+            "10.0.0.41",
+            resolution="1920x1080",
+            dynamic_resolution=True,
+            smart_sizing=True,
+            scale=140,
+            microphone=True,
+            auto_reconnect=True,
+            network_type="lan",
+            color_depth=32,
+            certificate_policy="tofu",
         )
         command = command_for(profile)
-        for option in ("/size:1920x1080", "+dynamic-resolution", "/smart-sizing", "/scale:140", "/microphone",
-                       "+auto-reconnect", "/network:lan", "/bpp:32", "/cert:tofu"):
+        for option in (
+            "/size:1920x1080",
+            "+dynamic-resolution",
+            "/smart-sizing",
+            "/scale:140",
+            "/microphone",
+            "+auto-reconnect",
+            "/network:lan",
+            "/bpp:32",
+            "/cert:tofu",
+        ):
             self.assertIn(option, command)
 
     def test_rejects_conflicting_advanced_display_options(self):
@@ -126,10 +175,12 @@ class ProfileTests(unittest.TestCase):
     @patch("rdp_tui.app.resolved_backend", return_value="encrypted_file")
     @patch("rdp_tui.app.freerdp_client", return_value="sdl-freerdp3")
     def test_profile_status_shows_effective_connection_details(self, _client, _backend, _password, _display):
-        profile = Profile("LAN", "10.0.0.41", user="apple", renderer="wayland_sdl", admin_session=True,
-                          smart_sizing=True)
-        lines = profile_status_lines(profile, {"profile_id": profile.id, "exit_code": 0,
-                                               "elapsed_seconds": 1.2, "finished_at": "today"})
+        profile = Profile(
+            "LAN", "10.0.0.41", user="apple", renderer="wayland_sdl", admin_session=True, smart_sizing=True
+        )
+        lines = profile_status_lines(
+            profile, {"profile_id": profile.id, "exit_code": 0, "elapsed_seconds": 1.2, "finished_at": "today"}
+        )
         report = "\n".join(lines)
         self.assertIn("sdl-freerdp3", report)
         self.assertIn("1920x1080", report)
@@ -166,10 +217,14 @@ class ProfileTests(unittest.TestCase):
     def test_import_remmina_and_export_rdp_without_password(self):
         with TemporaryDirectory() as directory:
             remmina = Path(directory) / "office.remmina"
-            remmina.write_text("[remmina]\nprotocol=RDP\nname=Office\nserver=rdp.example\nusername=EXAMPLE\\ada\nresolution_width=1920\nresolution_height=1080\n")
+            remmina.write_text(
+                "[remmina]\nprotocol=RDP\nname=Office\nserver=rdp.example\nusername=EXAMPLE\\ada\nresolution_width=1920\nresolution_height=1080\n"
+            )
             profile = import_profiles(remmina)[0]
-            self.assertEqual((profile.name, profile.user, profile.domain, profile.resolution),
-                             ("Office", "ada", "EXAMPLE", "1920x1080"))
+            self.assertEqual(
+                (profile.name, profile.user, profile.domain, profile.resolution),
+                ("Office", "ada", "EXAMPLE", "1920x1080"),
+            )
             exported = Path(directory) / "office.rdp"
             export_rdp(profile, exported)
             contents = exported.read_text()
