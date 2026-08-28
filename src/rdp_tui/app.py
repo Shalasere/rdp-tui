@@ -650,18 +650,33 @@ def run(screen: curses.window) -> None:
                 query = answer
                 selected = 0
         elif key == ord("i"):
-            answer = prompt(screen, "Import .remmina, .rdp, or rdp-tui JSON backup")
+            default_import = Path.home() / ".local" / "share" / "remmina"
+            answer = prompt(
+                screen,
+                "Import a Remmina directory, .remmina, .rdp, or rdp-tui JSON backup",
+                str(default_import) if default_import.is_dir() else "",
+            )
             if answer:
                 try:
                     imported = import_profiles(Path(answer).expanduser())
                     if not imported:
                         raise ValueError("The file contains no profiles")
-                    profiles = merge_profiles(profiles, imported)
+                    merged = merge_profiles(profiles, imported)
+                    added = len(merged) - len(profiles)
+                    profiles = merged
                     save_profiles(profiles)
                     query = ""
-                    selected = len(profiles) - len(imported)
-                    message = f"Imported {len(imported)} profile(s); passwords are not imported."
-                    LOGGER.info("Imported %d profile(s) from %s", len(imported), answer)
+                    selected = max(0, len(profiles) - added)
+                    message = (
+                        f"Imported {added} profile(s); skipped {len(imported) - added} unchanged; "
+                        "passwords are not imported."
+                    )
+                    LOGGER.info(
+                        "Imported %d profile(s), skipped %d unchanged from %s",
+                        added,
+                        len(imported) - added,
+                        answer,
+                    )
                 except (OSError, ValueError) as exc:
                     message = f"Import failed: {exc}"
                     LOGGER.warning("Import failed from %s: %s", answer, exc)

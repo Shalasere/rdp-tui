@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from .profiles import Profile
+from .profiles import COLOR_DEPTHS, NETWORK_TYPES, Profile
 
 
 def _user_and_domain(username: str, domain: str = "") -> tuple[str, str]:
@@ -22,6 +22,34 @@ def _as_bool(value: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"} if value else default
 
 
+def _positive_resolution(width: str, height: str) -> str:
+    """Return a valid custom resolution, ignoring Remmina's 0x0 sentinel."""
+    if width.isdecimal() and height.isdecimal() and int(width) > 0 and int(height) > 0:
+        return f"{width}x{height}"
+    return ""
+
+
+def _remmina_fullscreen(section: configparser.SectionProxy) -> bool:
+    """Translate Remmina's persisted connection-window mode."""
+    if section.get("fullscreen", ""):
+        return _as_bool(section.get("fullscreen", ""))
+    viewmode = section.get("viewmode", "")
+    return viewmode in {"3", "4"} if viewmode else True
+
+
+def _remmina_network(value: str) -> str:
+    """Translate Remmina network labels to FreeRDP's supported labels."""
+    aliases = {"none": "auto", "autodetect": "auto", "broadband": "broadband-high"}
+    network = aliases.get(value.strip().lower(), value.strip().lower())
+    return network if network in NETWORK_TYPES else "auto"
+
+
+def _remmina_color_depth(value: str) -> int:
+    """Keep explicit colour depths while treating Remmina's 99 as automatic."""
+    depth = int(value) if value.isdecimal() else 0
+    return depth if depth in COLOR_DEPTHS else 0
+
+
 def import_remmina(path: Path) -> list[Profile]:
     """Import connection settings from a Remmina .remmina file, never secrets."""
     config = configparser.ConfigParser(interpolation=None)
@@ -34,19 +62,34 @@ def import_remmina(path: Path) -> list[Profile]:
         raise ValueError("Remmina profile has no server")
     user, domain = _user_and_domain(section.get("username", ""), section.get("domain", ""))
     width, height = section.get("resolution_width", ""), section.get("resolution_height", "")
-    resolution = f"{width}x{height}" if width.isdecimal() and height.isdecimal() else ""
+    resolution = _positive_resolution(width, height)
+    scale_mode = section.get("scale", "0").strip()
+    sound = section.get("sound", "").strip().lower()
+    multimon = _as_bool(section.get("multimon", "")) or _as_bool(section.get("force_multimon", ""))
+    span_monitors = _as_bool(section.get("span", ""))
     return [
         Profile(
             name=section.get("name", path.stem),
             host=host,
             user=user,
             domain=domain,
-            fullscreen=_as_bool(section.get("fullscreen", ""), True),
+            fullscreen=_remmina_fullscreen(section),
             clipboard=not _as_bool(section.get("disableclipboard", "")),
-            audio=_as_bool(section.get("sound", "")),
+            audio=sound.startswith("local"),
             ignore_certificate=_as_bool(section.get("cert_ignore", "")),
             resolution=resolution,
-            multimon=_as_bool(section.get("multimon", "")),
+            dynamic_resolution=scale_mode == "2" and not multimon and not span_monitors,
+            multimon=multimon,
+            span_monitors=span_monitors,
+            smart_sizing=scale_mode == "1",
+            microphone=section.get("microphone", "").strip().lower() not in {"", "0", "off"},
+            auto_reconnect=not _as_bool(section.get("disableautoreconnect", "")),
+            network_type=_remmina_network(section.get("network", "")),
+            color_depth=_remmina_color_depth(section.get("colordepth", "")),
+            admin_session=_as_bool(section.get("console", "")),
+            gateway_host=section.get("gateway_server", "").strip(),
+            gateway_user=section.get("gateway_username", "").strip(),
+            gateway_domain=section.get("gateway_domain", "").strip(),
         )
     ]
 
@@ -83,6 +126,14 @@ def import_rdp(path: Path) -> list[Profile]:
 
 def import_profiles(path: Path) -> list[Profile]:
     """Import native JSON backups, Remmina profiles, or Microsoft RDP files."""
+    if path.is_dir():
+        remmina_files = sorted(path.glob("*.remmina"))
+        if not remmina_files:
+            raise ValueError("The directory contains no .remmina profiles")
+        profiles: list[Profile] = []
+        for remmina_file in remmina_files:
+            profiles.extend(import_remmina(remmina_file))
+        return profiles
     suffix = path.suffix.lower()
     if suffix == ".remmina":
         return import_remmina(path)
@@ -100,13 +151,20 @@ def import_profiles(path: Path) -> list[Profile]:
 
 
 def merge_profiles(current: list[Profile], incoming: list[Profile]) -> list[Profile]:
-    """Append imported profiles, regenerating an ID only when it collides."""
+    """Append new profiles, skipping unchanged imports and avoiding ID collisions."""
     used_ids = {profile.id for profile in current}
+    existing = [{key: value for key, value in profile.__dict__.items() if key != "id"} for profile in current]
+    added: list[Profile] = []
     for profile in incoming:
+        comparable = {key: value for key, value in profile.__dict__.items() if key != "id"}
+        if comparable in existing:
+            continue
         if profile.id in used_ids:
             profile.id = str(uuid4())
         used_ids.add(profile.id)
-    return [*current, *incoming]
+        existing.append(comparable)
+        added.append(profile)
+    return [*current, *added]
 
 
 def export_rdp(profile: Profile, path: Path) -> None:

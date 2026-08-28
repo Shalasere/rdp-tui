@@ -32,7 +32,11 @@ distributions use `xfreerdp`. rdp-tui detects either, preferring `xfreerdp3`.
 
 Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect. The profile editor shows every field at once: select a row, press `Enter` to edit it (or `Space` to toggle an option), then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availability and the result of the last session; press `s` for the selected profile's detailed status screen. Press `q` to quit.
 
-Press `i` to import a `.remmina`, `.rdp`, or rdp-tui JSON profile backup; imported passwords are deliberately excluded. Press `x` to export the selected profile as a standard `.rdp` file, also without its saved password.
+Press `i` to import a Remmina profile directory, one `.remmina` file, a `.rdp`
+file, or an rdp-tui JSON profile backup. The import prompt defaults to Remmina's
+standard profile directory when it exists, and unchanged profiles are skipped on
+repeat imports. Imported passwords are deliberately excluded. Press `x` to export
+the selected profile as a standard `.rdp` file, also without its saved password.
 
 Press `c` to clone the selected profile (then adjust it before saving), or `f` to filter profiles by name, host, user, or domain. Leave the filter blank to clear it.
 

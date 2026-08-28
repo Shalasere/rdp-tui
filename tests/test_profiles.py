@@ -233,11 +233,54 @@ class ProfileTests(unittest.TestCase):
             imported = import_profiles(exported)[0]
             self.assertEqual(imported.host, "rdp.example")
 
+    def test_imports_remmina_directory_and_advanced_settings(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "one.remmina").write_text(
+                "[remmina]\n"
+                "protocol=RDP\nname=Desktop\nserver=desktop.example\nusername=EXAMPLE\\ada\n"
+                "viewmode=1\nresolution_width=0\nresolution_height=0\nsound=local\nscale=1\n"
+                "disableautoreconnect=0\nnetwork=autodetect\ncolordepth=99\nconsole=1\n"
+                "gateway_server=gateway.example\ngateway_username=gate-user\ngateway_domain=EXAMPLE\n"
+            )
+            (source / "two.remmina").write_text(
+                "[remmina]\nprotocol=RDP\nname=Laptop\nserver=laptop.example\n"
+                "viewmode=4\nresolution_width=1920\nresolution_height=1080\nscale=2\n"
+                "force_multimon=1\nspan=0\ndisableautoreconnect=1\nnetwork=lan\ncolordepth=24\n"
+            )
+
+            desktop, laptop = import_profiles(source)
+            self.assertEqual(len(import_profiles(source)), 2)
+            self.assertEqual(desktop.resolution, "")
+            self.assertFalse(desktop.fullscreen)
+            self.assertTrue(desktop.audio)
+            self.assertTrue(desktop.smart_sizing)
+            self.assertTrue(desktop.auto_reconnect)
+            self.assertEqual(desktop.network_type, "auto")
+            self.assertEqual(desktop.color_depth, 0)
+            self.assertTrue(desktop.admin_session)
+            self.assertEqual(
+                (desktop.gateway_host, desktop.gateway_user, desktop.gateway_domain),
+                ("gateway.example", "gate-user", "EXAMPLE"),
+            )
+            self.assertEqual(laptop.resolution, "1920x1080")
+            self.assertTrue(laptop.fullscreen)
+            self.assertFalse(laptop.dynamic_resolution)
+            self.assertTrue(laptop.multimon)
+            self.assertFalse(laptop.auto_reconnect)
+            self.assertEqual(laptop.network_type, "lan")
+            self.assertEqual(laptop.color_depth, 24)
+
     def test_merge_profiles_preserves_distinct_ids(self):
         current = [Profile("Current", "one", id="same")]
         incoming = [Profile("Imported", "two", id="same")]
         merged = merge_profiles(current, incoming)
         self.assertEqual(len({profile.id for profile in merged}), 2)
+
+    def test_merge_profiles_skips_unchanged_imports(self):
+        current = [Profile("Current", "one", id="existing")]
+        incoming = [Profile("Current", "one", id="new")]
+        self.assertEqual(merge_profiles(current, incoming), current)
 
     def test_filters_profiles_by_connection_fields(self):
         profiles = [Profile("Office", "rdp.example", user="ada", domain="EXAMPLE"), Profile("LAN", "10.0.0.41")]
