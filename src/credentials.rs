@@ -7,7 +7,7 @@ use crate::secret::file::EncryptedFileStore;
 use crate::secret::service::SecretServiceStore;
 use secrecy::SecretString;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A backend that resolves durable credential references into launch-time secrets.
 pub trait CredentialStore {
@@ -46,6 +46,25 @@ impl CredentialStore for SystemCredentialStore {
             CredentialBackend::EncryptedFile => self.encrypted_file.retrieve(reference),
         }
     }
+}
+
+/// Store a password in the encrypted-file backend and return its pinned,
+/// concrete reference. Shared by the CLI and TUI so both save passwords the
+/// same way (INV-8).
+///
+/// # Errors
+///
+/// Returns a backend error when the secret cannot be written.
+pub fn store_encrypted_password(
+    config_root: &Path,
+    password: &SecretString,
+) -> Result<CredentialRef, CredentialError> {
+    EncryptedFileStore::new(config_root).store(password)
+}
+
+/// Best-effort removal of a previously stored encrypted-file secret.
+pub fn forget_encrypted(config_root: &Path, reference: CredentialRef) {
+    let _ = EncryptedFileStore::new(config_root).delete(reference);
 }
 
 /// Non-serializable secrets held only for the lifetime of a connection attempt.

@@ -3,10 +3,10 @@
 use crate::ProfileStore;
 use crate::config::ConfigStore;
 use crate::config::migrate::import_python_profiles;
+use crate::credentials::{forget_encrypted, store_encrypted_password};
 use crate::freerdp::discover::discover;
 use crate::model::{ConnectionPlan, Profile, ProfileId, Renderer};
 use crate::planner::plan;
-use crate::secret::file::EncryptedFileStore;
 use crate::session::{connect_profile, test_profile};
 use secrecy::SecretString;
 use std::fmt::Write as _;
@@ -120,7 +120,7 @@ fn credential_clear(
     };
     let name = profile.name.clone();
     store.upsert(profile).map_err(|error| error.to_string())?;
-    let _ = EncryptedFileStore::new(config_root).delete(reference);
+    forget_encrypted(config_root, reference);
     Ok(format!("credential: cleared the password for {name}\n"))
 }
 
@@ -137,14 +137,12 @@ pub fn set_profile_credential(
     mut profile: Profile,
     password: &str,
 ) -> Result<(), String> {
-    let backend = EncryptedFileStore::new(config_root);
-    let reference = backend
-        .store(&SecretString::from(password.to_owned()))
+    let reference = store_encrypted_password(config_root, &SecretString::from(password.to_owned()))
         .map_err(|error| error.to_string())?;
     let previous = profile.credential.replace(reference);
     store.upsert(profile).map_err(|error| error.to_string())?;
     if let Some(previous) = previous {
-        let _ = backend.delete(previous);
+        forget_encrypted(config_root, previous);
     }
     Ok(())
 }
