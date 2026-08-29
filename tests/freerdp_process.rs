@@ -37,6 +37,7 @@ fn launch_uses_runtime_identity_ownership() {
             .unwrap(),
         None,
         LaunchMode::OneShot,
+        None,
     )
     .unwrap();
     assert!(child.terminate_if_owned().unwrap().is_some());

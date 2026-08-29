@@ -109,7 +109,7 @@ fn run_with_askpass(
     let result = (|| {
         // A foreground session dies with its launcher; a detached connect
         // owner is the session supervisor's responsibility, not this runner.
-        let mut child = launch(prepared, session, askpass, LaunchMode::OneShot)?;
+        let mut child = launch(prepared, session, askpass, LaunchMode::OneShot, None)?;
         let status = child.wait()?;
         Ok(SessionResult {
             duration: started.elapsed(),
