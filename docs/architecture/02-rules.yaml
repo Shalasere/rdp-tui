@@ -1,0 +1,140 @@
+schema_version: 1
+
+# Load-bearing. A generated diff that violates any invariant or matches any
+# anti-pattern below should be treated as a contract violation and fixed
+# before the change is considered complete, regardless of whether tests pass.
+
+invariants:
+  - id: INV-1
+    text: "Profile=intent, ConnectionPlan=resolved-but-unacquired data (zero I/O), PreparedConnection=acquired execution state. Three distinct types, not two."
+    check: "grep model/plan.rs for Child|Process|Socket|TcpStream — must be absent"
+  - id: INV-2
+    text: "Only freerdp/command.rs emits FreeRDP argv syntax, and only from a PreparedConnection."
+    check: "grep for freerdp flag strings (e.g. '/v:', '/cert', '/gfx') outside freerdp/command.rs — must be absent"
+  - id: INV-3
+    text: "Secrets never appear in profiles.toml, config.toml, logs, history, dry-run output, diagnostic dumps, or argv where avoidable."
+    check: "no CredentialKey/secret value passed to Command::arg; grep log call sites for raw secret variables"
+  - id: INV-4
+    text: "After first storage, every credential has a concrete backend, never re-resolved implicitly on read/write."
+    check: "CredentialBackend::Automatic variant must not exist as a stored/persisted value — only as CredentialPreference"
+  - id: INV-5
+    text: "Every read-modify-write persistent operation is flock()-protected and atomically replaced. Lock file existence never implies ownership."
+    check: "config/file.rs write path must: open lockfile, flock(), read, write-temp, fsync, rename, fsync(dir), unlock — in that order"
+  - id: INV-6
+    text: "Stateful routes retain acquired resources for the lifetime of the dependent connection. The tunnel used for preflight is the tunnel used to connect — never torn down and reacquired."
+    check: "preflight and connect for an SshTunnel route must consume the same PreparedConnection/TunnelHandle instance"
+  - id: INV-7
+    text: "UI never claims knowledge the system doesn't expose. Unknown/NotApplicable != Fail. TCP/443-reachable != RD-Gateway-valid. Unresolvable local target DNS through a gateway != broken profile. No unobservable session states."
+    check: "RdGateway preflight: local target DNS failure must map to NotApplicable, not Fail"
+  - id: INV-8
+    text: "CLI and TUI invoke the same connection/credential/diagnostic/persistence functions — no parallel reimplementation."
+    check: "see no_duplicate_logic_pairs in 00-manifest.yaml"
+  - id: INV-9
+    text: "model/ depends on nothing but stdlib + serde-style traits."
+    check: "see forbidden_edges in 00-manifest.yaml"
+  - id: INV-10
+    text: "inspect/validate/list never acquire any resource or start any process, including a tunnel, for any route kind."
+    check: "cli inspect/validate/list command handlers must never call preflight::prepare"
+  - id: INV-11
+    text: "Orphan detection matches on (pid, start_time_ticks, uid), never bare pid."
+    check: "runtime/registry.rs orphan match function must read all three fields before returning a positive match"
+  - id: INV-12
+    text: "A panic anywhere restores the terminal exactly once via the guarded main-loop catch_unwind boundary, without an unrelated background-thread panic doing it prematurely."
+    check: "tui/terminal.rs TerminalGuard::restore must be called from exactly one call site wrapping run_tui; any global panic hook must be gated on an atomic flag and must not itself panic"
+  - id: INV-13
+    text: "Detachment is a stated policy and PDEATHSIG must not contradict it: connect-launched sessions are detached by default and PDEATHSIG is only set for one-shot non-detaching invocations (test/preflight-only)."
+    check: "runtime::process::spawn_child must only set PR_SET_PDEATHSIG when detached==false; connect command path must call spawn_child with detached=true"
+
+decisions:
+  - id: DEC-session-detachment
+    decision: "connect-launched sessions survive rdp-tui's own death by default (detached=true)"
+    rationale: "matches user expectation — closing the launcher terminal is not the same action as closing the remote desktop window"
+    implies: ["INV-13", "orphan scan reports a surviving connect session as still_running, not orphaned"]
+  - id: DEC-lock-primitive
+    decision: "flock() on an open fd, never a lock-file-existence check"
+    rationale: "flock releases automatically on crash/SIGKILL; a sentinel file does not, and becomes a permanent stale lock"
+    implies: ["INV-5"]
+  - id: DEC-rd-gateway-dns
+    decision: "local target DNS failure downgrades to NotApplicable for an RdGateway route, never Fail"
+    rationale: "gateways commonly route to internally-resolvable hostnames the local client legitimately cannot resolve"
+    implies: ["INV-7"]
+  - id: DEC-deep-test-framing
+    decision: "deep-test uses FreeRDP's documented auth-only mode, gated behind per-version/security-mode capability validation (FreeRdpCapabilities.auth_only), never automatic, rate-limited via a persisted per-profile timestamp framed as a courtesy not a lockout guarantee"
+    rationale: "auth-only behavior is not guaranteed uniform across FreeRDP versions/security modes; repeated real auth attempts risk tripping the target domain's account lockout policy, which rdp-tui cannot observe or bound"
+  - id: DEC-orphan-identity
+    decision: "orphan/process registry matches on (pid, start_time_ticks, uid) as a compound key"
+    rationale: "PIDs are recycled by the kernel; a bare-PID match can eventually target an unrelated process that inherited a stale PID"
+    implies: ["INV-11"]
+  - id: DEC-terminal-safety-mechanism
+    decision: "catch_unwind boundary + TerminalGuard RAII, not a bare global panic::set_hook doing terminal I/O; SIGINT deferred to the event loop via an atomic flag, never handled inline"
+    rationale: "a global panic hook fires for any thread including background workers; Crossterm ops are not async-signal-safe inside a raw signal handler"
+    implies: ["INV-12"]
+  - id: DEC-runtime-module-split
+    decision: "process-group setup and orphan registry live in runtime/, shared by freerdp/ and ssh/ — not duplicated or nested under either protocol module"
+    rationale: "process lifecycle is generic; nesting it under freerdp/ made protocol-specific-by-name code own cross-cutting behavior ssh/ also needed"
+  - id: DEC-ssh-noninteractive-flags
+    decision: "spawned ssh always includes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes"
+    rationale: "BatchMode makes the setsid()-detached tunnel process fail fast instead of hanging on an unreachable prompt; accept-new gives TOFU behavior for new hosts while still hard-failing on a changed host key"
+  - id: DEC-plan-vs-prepared-split
+    decision: "ConnectionPlan is pure data; PreparedConnection (produced by an explicit prepare() call) is the only place a live process handle may live"
+    rationale: "without the split, resolving a plan for an SSH profile could silently start a tunnel process, contradicting inspect's no-side-effects guarantee"
+    implies: ["INV-1", "INV-10"]
+  - id: DEC-phase-0-rescope
+    decision: "pre-port validation work is scoped to genuinely uncertain external-tool facts (SSH BatchMode/accept-new behavior against real jump hosts; FreeRDP auth-only behavior per version) rather than porting already-fully-specified patterns (credential pinning, atomic writes) to Python first"
+    rationale: "rewrite velocity doesn't change whether an already-understood pattern is correct; only genuine external unknowns benefit from a pre-port spike"
+
+anti_patterns:
+  - id: AP-1
+    pattern: "ConnectionPlan or any model/ type containing a Child, TcpStream, or other live handle"
+    fix: "move the handle into PreparedConnection/TunnelHandle, produced only by preflight::prepare"
+  - id: AP-2
+    pattern: "CredentialBackend resolution re-run on every read/write instead of once at first store"
+    fix: "resolve once, persist concrete CredentialRef.backend, never re-probe on subsequent access"
+  - id: AP-3
+    pattern: "config/profile file writes without flock() + atomic rename"
+    fix: "see DEC-lock-primitive and INV-5"
+  - id: AP-4
+    pattern: "lock file deleted/unlinked after a write as a 'cleanup' step"
+    fix: "never unlink the lock file; only flock() acquisition state matters"
+  - id: AP-5
+    pattern: "RD Gateway preflight failing because the local machine can't resolve the target hostname"
+    fix: "see DEC-rd-gateway-dns — map to NotApplicable"
+  - id: AP-6
+    pattern: "SessionState with Authenticating/Connecting/Reconnecting variants inferred from a running child process"
+    fix: "these are not reliably observable; use only Running/Ended unless a version-gated capability proves otherwise"
+  - id: AP-7
+    pattern: "a single Action/Event enum spanning both UI keystrokes and background async results"
+    fix: "UI-local handling is direct function calls; background work uses the narrow BackgroundEvent enum only"
+  - id: AP-8
+    pattern: "an application-service layer between tui/cli and planner/credentials/preflight that only forwards calls"
+    fix: "tui/ and cli/ call planner/credentials/preflight/freerdp/ssh directly; no intermediate service objects"
+  - id: AP-9
+    pattern: "orphan/process cleanup matching on bare PID"
+    fix: "see DEC-orphan-identity — require (pid, start_time_ticks, uid) match"
+  - id: AP-10
+    pattern: "PR_SET_PDEATHSIG applied unconditionally to every spawned child"
+    fix: "see INV-13/DEC-session-detachment — only for detached==false spawns"
+  - id: AP-11
+    pattern: "PR_SET_PDEATHSIG's prctl call issued from a thread other than the one guaranteed to live as long as the process (e.g. an arbitrary async worker task)"
+    fix: "issue the prctl only from a main/dedicated-supervisor thread, or avoid PDEATHSIG entirely if spawn happens on a pooled worker"
+  - id: AP-12
+    pattern: "global std::panic::set_hook directly calling disable_raw_mode()/LeaveAlternateScreen with no guard"
+    fix: "see DEC-terminal-safety-mechanism — use catch_unwind + TerminalGuard; hook is a flag-gated fallback only, never the primary mechanism"
+  - id: AP-13
+    pattern: "SIGINT handler calling Crossterm terminal functions directly inside the signal handler"
+    fix: "set an atomic flag/self-pipe only inside the handler; perform restoration from the normal event loop"
+  - id: AP-14
+    pattern: "ssh spawned without BatchMode=yes, risking a hung interactive prompt on a detached (setsid'd) process"
+    fix: "see DEC-ssh-noninteractive-flags"
+  - id: AP-15
+    pattern: "a tunnel torn down after preflight and a new tunnel established for the subsequent connect"
+    fix: "see INV-6 — reuse the same PreparedConnection/TunnelHandle"
+  - id: AP-16
+    pattern: "sh -c \"xfreerdp ...\" or any shell-mediated FreeRDP invocation for ordinary launching"
+    fix: "Command::new(executable).arg(...) directly, argv built without shell interpolation"
+  - id: AP-17
+    pattern: "deep-test triggered automatically (e.g. as part of a periodic background reachability refresh)"
+    fix: "deep-test is always an explicit, individually-confirmed user action — never automatic under any circumstance"
+  - id: AP-18
+    pattern: "deep-test rate limit implemented as process-local in-memory state only"
+    fix: "persist last_deep_test per profile under $XDG_STATE_HOME through the locked config-write path"

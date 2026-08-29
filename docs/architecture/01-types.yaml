@@ -1,0 +1,140 @@
+schema_version: 1
+
+# Rust type stubs an implementing agent should treat as the target shape.
+# Field names/types are binding; exact derive macros, visibility, and doc comments are not.
+
+model.profile:
+  Profile:
+    id: ProfileId
+    name: String
+    endpoint: Endpoint
+    identity: IdentityConfig
+    route: Route
+    display: DisplayConfig
+    devices: DeviceConfig
+    security: SecurityConfig
+    credential: "Option<CredentialRef>"
+  constraint: no_freerdp_argv_tokens_in_any_field
+
+model.endpoint:
+  Host: enum [Hostname(String), Ipv4(Ipv4Addr), Ipv6(Ipv6Addr)]
+  Endpoint: {host: Host, port: u16}
+  parse_rule: single_centralized_parser_no_other_module_reimplements
+
+model.route:
+  Route:
+    enum:
+      - Direct
+      - "RdGateway { gateway: Endpoint, credential: Option<CredentialRef> }"
+      - "SshTunnel { jump_host: String }"
+  PlannedRoute:
+    enum:
+      - Direct
+      - "RdGateway { gateway: Endpoint }"
+      - "SshTunnel { jump_host: String, target: Endpoint }"
+
+model.plan:
+  ConnectionPlan:
+    target: Endpoint
+    route: PlannedRoute
+    identity: IdentityConfig
+    display: DisplayConfig
+    devices: DeviceConfig
+    security: SecurityConfig
+    credentials: ResolvedCredentials
+    client: FreeRdpClient
+  purity: MUST_NOT_CONTAIN [Child, TcpStream, UnixStream, "any process handle", "any socket"]
+
+model.prepared:
+  PreparedConnection:
+    plan: ConnectionPlan
+    effective_endpoint: Endpoint
+    route_handle: "Option<RouteHandle>"
+  RouteHandle:
+    enum:
+      - "SshTunnel(TunnelHandle)"
+      # Direct and RdGateway intentionally have no variant — nothing stateful to hold
+  TunnelHandle:
+    child: Child
+    local_endpoint: Endpoint
+    established_at: Instant
+
+model.credential:
+  CredentialPreference: enum [Automatic, "Explicit(CredentialBackend)"]
+  CredentialBackend: enum [SecretService, EncryptedFile]
+  CredentialRef: {backend: CredentialBackend, key: CredentialKey}
+  invariant: backend_field_always_concrete_never_symbolic_automatic
+
+model.session:
+  AttemptState: enum [Resolving, AcquiringRoute, Preflighting, Launching]
+  SessionState: enum [Running, "Ended(SessionResult)"]
+  SessionResult:
+    duration: Duration
+    exit_code: "Option<i32>"
+    failure: "Option<ConnectionFailure>"
+    renderer: Renderer
+    freerdp_version: Version
+  purity: strict_no_io_pure_types_only
+
+model.failure:
+  ConnectionFailure:
+    enum:
+      - Configuration
+      - Dns
+      - Network
+      - Timeout
+      - Ssh
+      - Tunnel
+      - Gateway
+      - Authentication
+      - Certificate
+      - UnsupportedCapability
+      - FreeRdpMissing
+      - FreeRdpVersion
+      - Renderer
+      - ProcessFailure
+      - Unknown
+
+freerdp.capabilities:
+  FreeRdpCapabilities:
+    version: Version
+    sdl: bool
+    x11: bool
+    askpass: bool
+    gateway: bool
+    multimon: bool
+    dynamic_resolution: bool
+    auth_only: AuthOnlySupport
+  AuthOnlySupport: enum [Validated, NotSupported, Unvalidated]
+
+runtime.registry:
+  ProcessIdentity:
+    pid: u32
+    start_time_ticks: u64   # source: /proc/<pid>/stat field 22
+    uid: u32
+    kind: ChildKind
+    parent_session_id: SessionId
+  ChildKind: enum [Tunnel, FreeRdp]
+  match_rule: "all three of (pid, start_time_ticks, uid) must match before treating an entry as still-ours"
+
+diagnostics:
+  DiagnosticCheck: {name: String, state: DiagnosticState, duration: Duration, details: String}
+  DiagnosticResult: {checks: "Vec<DiagnosticCheck>"}
+  DiagnosticState: enum [Pass, Fail, Unknown, NotApplicable, InProgress, NotSupported]
+  rule: never_collapse_unknown_or_not_applicable_into_fail
+
+background:
+  BackgroundEvent:
+    enum:
+      - "PreflightFinished(ProfileId, PreflightResult)"
+      - "TunnelFailed(ProfileId, TunnelError)"
+      - "SessionExited(SessionId, SessionResult)"
+      - "OrphanScanComplete(Vec<DiscoveredProcess>)"
+
+config.errors:
+  StoreError:
+    enum:
+      - Locked
+      - Corrupt
+      - "Io(io::Error)"
+      - "Schema { file: String, path: String, expected: String, found: String }"

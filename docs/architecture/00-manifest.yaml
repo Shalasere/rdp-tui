@@ -1,0 +1,109 @@
+schema_version: 1
+
+meta:
+  project: rdp-tui
+  contract_ref: rdp-tui-architecture-contract-final.md
+  language: rust
+  ui_framework: ratatui
+  terminal_backend: crossterm
+  protocol_engine: freerdp
+  platform: linux
+  reference_distro: arch
+  purpose: >
+    This file and its siblings in this directory are a machine-consumable
+    companion to the human-readable architecture contract. An implementing
+    agent should treat 02-rules.yaml as load-bearing (violating an entry
+    there is a contract violation, not a style nit), and should re-check
+    generated code against it before considering a module complete.
+
+module_dependency_graph:
+  # directed edges: key depends_on values. cycle = error. edge not listed = forbidden.
+  model: []
+  planner: [model]
+  profile_store: [model]
+  credentials: [model]
+  preflight: [model, planner, runtime, freerdp, ssh]
+  runtime: [model]
+  freerdp: [model, runtime]
+  ssh: [model, runtime]
+  secret: [model]
+  config: [model]
+  tui: [model, planner, credentials, preflight, freerdp, ssh, secret, config]
+  cli: [model, planner, credentials, preflight, freerdp, ssh, secret, config]
+
+forbidden_edges:
+  - {from: model, to: tui}
+  - {from: model, to: cli}
+  - {from: model, to: freerdp}          # argv syntax must not leak into model
+  - {from: model, to: ssh}
+  - {from: model, to: runtime}          # ConnectionPlan must be constructible with zero process knowledge
+  - {from: model, to: ratatui}
+  - {from: model, to: crossterm}
+  - {from: model, to: dbus}
+  - {from: freerdp, to: tui}
+  - {from: freerdp, to: cli}
+  - {from: ssh, to: tui}
+  - {from: ssh, to: cli}
+  - {from: tui, to: cli}                # neither frontend depends on the other
+  - {from: cli, to: tui}
+
+no_duplicate_logic_pairs:
+  # these must call the SAME function, not parallel reimplementations
+  - [tui, cli]   # connection/credential/diagnostic/persistence logic must be shared, not duplicated
+
+file_layout:
+  src/main.rs: entrypoint only
+  src/model/profile.rs: [Profile]
+  src/model/endpoint.rs: [Endpoint, Host]
+  src/model/route.rs: [Route, PlannedRoute]
+  src/model/plan.rs:
+    owns: [ConnectionPlan]
+    constraint: strict_no_io   # zero process spawns, zero sockets, zero filesystem access
+  src/model/prepared.rs:
+    owns: [PreparedConnection, RouteHandle, TunnelHandle]
+    constraint: types_only_here_impl_lives_in_preflight_and_ssh
+  src/model/credential.rs: [CredentialBackend, CredentialPreference, CredentialRef]
+  src/model/session.rs:
+    owns: [AttemptState, SessionState, SessionResult]
+    constraint: strict_no_io   # no Child, no process handles — pure types only
+  src/model/failure.rs: [ConnectionFailure]
+  src/planner.rs:
+    fn_signature: "fn plan(profile: &Profile, caps: &FreeRdpCapabilities) -> ConnectionPlan"
+    constraint: strict_no_io
+  src/profile_store.rs: profile CRUD, delegates locking/atomic-write to config::file
+  src/credentials.rs: credential store/retrieve/delete/migrate orchestration, delegates to secret::*
+  src/preflight.rs:
+    owns: [prepare_fn, validate_fn, preflight_fn, deep_test_fn]
+    fn_signature: "fn prepare(plan: &ConnectionPlan) -> Result<PreparedConnection, ConnectionFailure>"
+    constraint: only_module_allowed_to_call_prepare_except_ssh_tunnel_internals
+  src/runtime/process.rs:
+    owns: [spawn_child]
+    fn_signature: "fn spawn_child(cmd: Command, detached: bool) -> io::Result<(Child, ProcessIdentity)>"
+    constraint: sets_pdeathsig_iff_detached_is_false
+  src/runtime/registry.rs:
+    owns: [ProcessIdentity, register, deregister, scan_for_orphans]
+    identity_fields: [pid, start_time_ticks, uid, kind, parent_session_id]
+    constraint: never_match_on_pid_alone
+  src/freerdp/discover.rs: executable discovery, version parsing
+  src/freerdp/capabilities.rs: [FreeRdpCapabilities]
+  src/freerdp/command.rs:
+    fn_signature: "fn build_command(pc: &PreparedConnection) -> (PathBuf, Vec<OsString>, Vec<(OsString,OsString)>)"
+    constraint: [pure_function, only_place_freerdp_argv_syntax_may_appear, no_shell_invocation]
+  src/freerdp/process.rs: spawns via runtime::process, owns Child, produces SessionResult on exit
+  src/ssh/tunnel.rs:
+    fn_signature: "fn establish(jump_host: &str, target: Endpoint) -> Result<TunnelHandle, TunnelError>"
+    constraint: [spawns_via_runtime_process, uses_batchmode_yes, uses_accept_new_hostkey_policy]
+  src/secret/service.rs: Secret Service backend impl
+  src/secret/file.rs: encrypted-file fallback backend impl
+  src/config/file.rs:
+    constraint: [atomic_write_required, flock_required, never_lockfile_existence_check]
+  src/config/migrate.rs: schema version migration
+  src/tui/app.rs: main TUI state/loop
+  src/tui/terminal.rs:
+    owns: [TerminalGuard]
+    constraint: catch_unwind_boundary_required_around_main_loop
+  src/tui/layout.rs: {}
+  src/tui/keymap.rs: {}
+  src/tui/theme.rs: {}
+  src/tui/views/: per-screen render code
+  src/cli/commands.rs: [list, show, inspect, validate, test, connect, import, export, doctor, config_paths, info]

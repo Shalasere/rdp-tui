@@ -1,0 +1,166 @@
+schema_version: 1
+
+xdg_paths:
+  config: {var: XDG_CONFIG_HOME, path: rdp-tui/, files: [config.toml, profiles.toml]}
+  state: {var: XDG_STATE_HOME, path: rdp-tui/, files: [history.toml, "deep_test/<profile_id>.json"]}
+  cache: {var: XDG_CACHE_HOME, path: rdp-tui/, files: ["capability probe cache"]}
+  runtime: {var: XDG_RUNTIME_DIR, path: rdp-tui/sessions/, files: ["<session-id>.json"]}
+
+command_templates:
+  ssh_tunnel:
+    template: >-
+      ssh -N -T
+      -o BatchMode=yes
+      -o StrictHostKeyChecking=accept-new
+      -o ExitOnForwardFailure=yes
+      -L 127.0.0.1:{local_port}:{target_host}:{target_port}
+      {jump_host}
+    spawn_via: runtime::process::spawn_child
+    detached_param: "true if backing a connect session, false if backing a one-shot test/preflight"
+    port_allocation:
+      algorithm: "bind 127.0.0.1:0, read assigned port, close socket, spawn ssh with that port"
+      race_note: "TOCTOU window accepted; ExitOnForwardFailure=yes converts a lost race into a clean failure"
+      retry: {bounded_attempts: 5, on_failure: "surface explicit 'could not allocate a local port' diagnostic"}
+
+  freerdp_launch:
+    built_by: freerdp/command.rs::build_command
+    input: PreparedConnection
+    target_field_used: effective_endpoint   # NEVER plan.target directly — must route through PreparedConnection
+    invocation: "Command::new(executable).args(...)  — no shell"
+
+cli_commands:
+  - {name: list, calls_prepare: false}
+  - {name: show, calls_prepare: false}
+  - {name: inspect, calls_prepare: false, note: "shows PlannedRoute + template argv only, never effective_endpoint for a tunnel"}
+  - {name: validate, calls_prepare: false}
+  - {name: test, calls_prepare: true, detached: false}
+  - {name: connect, calls_prepare: true, detached: true}
+  - {name: import, calls_prepare: false}
+  - {name: export, calls_prepare: false}
+  - {name: doctor, calls_prepare: false, note: "acts on runtime/registry.rs orphan scan results, requires full identity match before any termination action"}
+  - {name: config_paths, calls_prepare: false}
+  - {name: info, calls_prepare: false}
+
+diagnostic_tiers:
+  validate:
+    network: false
+    checks: [schema, endpoint_syntax, required_fields, logical_incompatibilities, known_unsupported_capabilities]
+  preflight:
+    network: true
+    acquires_resources: "only for SshTunnel route, via prepare()"
+    direct: [dns, tcp_target, freerdp_availability, credential_availability]
+    rd_gateway:
+      target_syntax: required_pass
+      target_dns_local: informational_only   # NotApplicable on failure, never Fail — see DEC-rd-gateway-dns
+      gateway_dns: required_pass
+      gateway_tcp_443: required_pass
+      target_tcp_direct: not_applicable_always
+      end_to_end: unknown_always
+    ssh_tunnel: [ssh_process_starts, forward_listener_established, "target_through_retained_tunnel (reuses PreparedConnection if next op is connect)"]
+  deep_test:
+    network: true
+    mechanism: freerdp_auth_only_mode
+    gate: "FreeRdpCapabilities.auth_only == Validated required; NotSupported otherwise"
+    automatic: never
+    warning: "one-time warning before first deep-test per profile"
+    rate_limit: {scope: persisted_per_profile, path: "$XDG_STATE_HOME/rdp-tui/deep_test/<profile_id>.json", framing: courtesy_not_guarantee}
+  connect:
+    network: true
+    acquires_resources: true
+    detached: true
+
+test_matrix:
+  model:
+    - endpoint_parsing_hostname_ipv4_ipv6_with_and_without_port
+    - route_configuration_validation
+    - certificate_policy_enum_exhaustiveness
+    - profile_serialization_roundtrip
+    - connection_plan_construction_asserts_zero_io_for_all_route_kinds_including_ssh_tunnel
+  freerdp_adapter:
+    - argv_direct
+    - argv_rd_gateway
+    - argv_ssh_effective_endpoint_not_plan_target
+    - argv_fullscreen
+    - argv_multimon
+    - argv_dynamic_resolution
+    - argv_audio
+    - argv_clipboard
+    - argv_drive_redirection
+    - argv_microphone
+    - argv_certificate_modes
+    - argv_advanced_options_passthrough
+    - redacted_logging_output_contains_no_secret
+  credentials:
+    - automatic_and_secret_service_available_pins_secret_service
+    - automatic_and_secret_service_unavailable_pins_encrypted_file
+    - environment_change_after_pin_does_not_change_backend
+    - explicit_migration_succeeds
+    - migration_fails_before_commit_old_remains_authoritative
+    - migration_cleanup_fails_after_commit_new_remains_authoritative_old_becomes_orphan
+    - delete_profile_cleans_up_associated_credential
+  persistence:
+    - atomic_replacement_basic
+    - corrupt_file_detected_and_preserved_not_overwritten
+    - concurrent_writer_locking_second_writer_blocks_or_errors
+    - kill_lock_holder_mid_write_confirm_flock_releases_and_next_writer_not_wedged
+    - unique_temp_files_per_writer
+    - failed_write_leaves_previous_file_valid
+  ssh_tunnel:
+    - ssh_exits_immediately_bad_host
+    - forward_cannot_be_created
+    - forward_becomes_available
+    - target_through_tunnel_reachable
+    - target_through_tunnel_unavailable
+    - tunnel_process_dies_mid_session
+    - cleanup_on_normal_end
+    - cleanup_on_failed_launch
+    - sigkill_rdp_tui_during_connected_detached_session_tunnel_survives_reported_still_running
+    - sigkill_rdp_tui_during_test_only_non_detached_invocation_pdeathsig_terminates_tunnel
+    - ephemeral_port_steal_before_bind_forces_bounded_retry_success
+  terminal_safety:
+    - panic_in_render_path_restores_raw_mode_and_alt_screen
+    - panic_on_background_worker_thread_does_not_touch_terminal_while_main_loop_guard_active
+    - simulated_sigint_restores_terminal_via_deferred_flag_path
+  deep_test:
+    - persisted_rate_limit_blocks_second_invocation_from_separate_process
+    - one_time_warning_shown_before_first_deep_test_per_profile
+    - version_without_validated_auth_only_returns_not_supported_not_silent_attempt
+  tui:
+    - geometry_80x24
+    - geometry_normal_desktop
+    - geometry_very_wide
+    - zero_profiles
+    - many_profiles
+    - long_profile_names_and_unicode
+    - modal_error_state
+    - snapshot_regressions_added_as_discovered_not_precomputed_matrix
+
+phase_plan:
+  phase_0:
+    type: pre_port_spike
+    scope: genuinely_uncertain_external_facts_only
+    items:
+      - spike_ssh_batchmode_and_accept_new_against_real_jump_hosts
+      - spike_freerdp_auth_only_behavior_per_target_version
+    explicitly_not_in_scope: "porting credential-pinning or atomic-write patterns to Python first — see DEC-phase-0-rescope"
+  phase_1:
+    - model_types_incl_plan_prepared_split
+    - endpoint_parsing
+    - config_parsing
+  phase_2:
+    - persistence_atomic_write_flock
+    - credentials_pinning_and_migration
+    - freerdp_discovery_incl_auth_only_capability_detection
+    - freerdp_argv_adapter
+    - ssh_tunnel_lifecycle_process_group_orphan_registry_detachment_policy
+    - topology_aware_preflight_incl_rd_gateway_dns_correction
+  phase_3:
+    - cli_list_inspect_validate_test_connect
+  phase_4:
+    - ratatui_frontend_incl_catch_unwind_terminal_safety
+  phase_5:
+    items:
+      - python_import_migration
+      - behavior_comparison_against_python_as_executable_spec
+      - regression_verification
+    note: "parity target is intended user-visible behavior, not known Python implementation defects"

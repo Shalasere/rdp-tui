@@ -1,0 +1,240 @@
+schema_version: 1
+
+meta:
+  project: rdp-tui
+  status: normative_amendment
+  amends: rdp-tui-architecture-contract-final.md
+  purpose: >
+    Resolve implementation blockers found during review of the final contract.
+    When this file conflicts with the original contract or 00-03 YAML files,
+    this file wins. Unmentioned INV-* rules remain binding.
+
+normative_priority:
+  - 04-amendments.yaml
+  - 02-rules.yaml
+  - rdp-tui-architecture-contract-final.md
+  - 00-manifest.yaml
+  - 01-types.yaml
+  - 03-process.yaml
+
+resolved_gaps:
+  - id: GAP-session-owner
+    resolution: dedicated_session_supervisor
+  - id: GAP-launch-credentials
+    resolution: nonserializable_credential_lease_and_memfd_askpass
+  - id: GAP-undefined-types
+    resolution: binding_type_additions_below
+  - id: GAP-advanced-overrides
+    resolution: explicit_narrow_escape_hatch
+  - id: GAP-certificate-ux
+    resolution: tofu_default_and_interactive_changed_certificate_flow
+  - id: GAP-import-surface
+    resolution: import_current_formats_and_directories
+  - id: GAP-python-migration
+    resolution: explicit_field_and_secret_migration_contract
+  - id: GAP-spec-validation
+    resolution: versioned_yaml_and_ci_contract_validator
+
+module_graph_amendments:
+  add_module:
+    session: [model, planner, credentials, preflight, freerdp, ssh, config, runtime]
+  replace_dependencies:
+    credentials: [model, secret, config]
+    freerdp: [model, runtime, credentials]
+    tui: [model, session, planner, credentials, preflight, freerdp, ssh, secret, config]
+    cli: [model, session, planner, credentials, preflight, freerdp, ssh, secret, config]
+  add_files:
+    src/session/mod.rs: shared connect/test orchestration used by TUI and CLI
+    src/session/supervisor.rs: detached connect-session owner
+    src/freerdp/certificate.rs: certificate pin discovery, fingerprinting, archive, and trust workflow
+    src/credentials/lease.rs: nonserializable launch-time secret material
+    src/credentials/askpass.rs: sealed-memfd ASKPASS bridge
+    src/config/contract.rs: contract schema and cross-reference validator used by tests/CI
+
+session_supervisor:
+  applies_to: connect_only
+  policy:
+    - "A detached connect session is owned by a dedicated rdp-tui session supervisor, never by an unowned pair of FreeRDP/SSH children."
+    - "The supervisor receives a non-secret ConnectionPlan through an inherited anonymous pipe; plans and secrets are never placed in argv."
+    - "The supervisor resolves a CredentialLease locally, calls prepare(), runs the integrated preflight against that same PreparedConnection, launches FreeRDP, and retains every RouteHandle."
+    - "When FreeRDP exits, the supervisor terminates and reaps the tunnel, records SessionResult, removes its runtime registry entry, and exits."
+    - "If the TUI/CLI launcher exits, the supervisor and visible session survive. There is still exactly one live owner responsible for tunnel cleanup."
+    - "A standalone preflight/test is one-shot and does not promise resource reuse by a later, separate connect command. Reuse is mandatory inside one connect operation."
+  runtime_record:
+    path: "$XDG_RUNTIME_DIR/rdp-tui/sessions/<session-id>.json"
+    fields: [session_id, supervisor_identity, freerdp_identity, tunnel_identity, profile_id, state]
+    identity_rule: "Every process identity uses pid + start_time_ticks + uid; never pid alone."
+  failure_recovery:
+    supervisor_missing_child_alive: "doctor reports inconsistent ownership and offers an explicit, identity-checked action"
+    supervisor_alive_launcher_dead: "report session as still running; never auto-terminate"
+    supervisor_and_children_dead: "remove stale runtime record"
+
+credential_pipeline:
+  binding_types:
+    ResolvedCredentials:
+      main: "Option<CredentialRef>"
+      gateway: "Option<CredentialRef>"
+      constraint: "references only; Serialize allowed; contains no secret material"
+    CredentialLease:
+      main: "Option<SecretString>"
+      gateway: "Option<SecretString>"
+      constraint: "not Clone, not Serialize, redacted Debug, zeroized on Drop"
+    AskpassLease:
+      main_fd: "Option<OwnedFd>"
+      gateway_fd: "Option<OwnedFd>"
+      helper: PathBuf
+      constraint: "owns sealed memfds and closes them on Drop"
+  flow:
+    - "credentials::acquire(ResolvedCredentials) -> CredentialLease"
+    - "credentials::askpass::prepare(&CredentialLease) -> AskpassLease"
+    - "freerdp::command builds executable/argv and non-secret environment only"
+    - "freerdp::process receives PreparedConnection + AskpassLease and passes only FD numbers/helper mode through environment"
+    - "the rdp-tui askpass helper reads the requested secret from the inherited sealed memfd; no secret value appears in argv, logs, config, or ordinary environment variables"
+  logging: "CredentialLease and AskpassLease Debug implementations are always redacted."
+
+binding_type_additions:
+  ids:
+    ProfileId: "UUID newtype"
+    SessionId: "UUID newtype"
+    CredentialKey: "opaque random 256-bit identifier newtype"
+  IdentityConfig:
+    username: String
+    domain: String
+  DisplayConfig:
+    renderer: Renderer
+    fullscreen: bool
+    resolution: "Option<(u16,u16)>"
+    dynamic_resolution: bool
+    multimon: bool
+    span_monitors: bool
+    smart_sizing: bool
+    scale_percent: "Option<u16>"
+    color_depth: "Option<u8>"
+  DeviceConfig:
+    clipboard: bool
+    audio_playback: bool
+    microphone: bool
+    shared_folders: "Vec<PathBuf>"
+    printers: bool
+  SecurityConfig:
+    certificate_policy: CertificatePolicy
+    admin_session: bool
+    network_profile: NetworkProfile
+    advanced: AdvancedOverrides
+  Renderer: "enum [WaylandSdl, X11]"
+  CertificatePolicy: "enum [Tofu, System, Deny, Ignore]"
+  NetworkProfile: "enum [Auto, Modem, BroadbandLow, BroadbandHigh, Wan, Lan]"
+  FreeRdpClient:
+    executable: PathBuf
+    renderer: Renderer
+    version: Version
+  AdvancedOverrides:
+    freerdp_args: "Vec<String>"
+    constraints:
+      - "This is the sole documented exception to the no-FreeRDP-token-in-Profile rule."
+      - "Reject target, username, domain, password, gateway-password, auth-only, shell, and executable-selection switches."
+      - "Each entry is one argv item; never parse or execute it through a shell."
+      - "Inspection shows these values after credential-switch rejection and log redaction."
+  PreflightResult: "{checks: Vec<DiagnosticCheck>, prepared: Option<PreparedConnection>}"
+  TunnelError: "typed SSH startup/listener/target/exit failure with redacted context"
+  DiscoveredProcess: "{identity: ProcessIdentity, observed_state: ProcessObservedState}"
+  ProcessObservedState: "enum [StillRunning, Unowned, Stale]"
+
+profile_shape_amendment:
+  add_field: "advanced: AdvancedOverrides"
+  note: "All other Profile fields remain as declared in 01-types.yaml."
+
+certificate_contract:
+  default_policy: Tofu
+  system_semantics: "Use platform/FreeRDP trust behavior; may require interaction and must never be used with a renderer that hides prompts without an rdp-tui mediation path."
+  tofu_semantics: "Accept and pin first certificate; reject changed certificate until explicit user confirmation."
+  changed_certificate:
+    detection: "Monitor FreeRDP output while the child is live; do not wait indefinitely for FreeRDP to exit from a hidden prompt."
+    child_action: "Terminate and reap only the identity-verified FreeRDP child started for this attempt."
+    display: [profile, endpoint, pinned_sha256, presented_sha256, safety_warning]
+    accept_key: T
+    cancel_keys: [Q, Esc]
+    accept_action:
+      - "Archive the old pin under $XDG_STATE_HOME/rdp-tui/certificate-backups with mode 0600."
+      - "Keep the backup recoverable; never silently delete it."
+      - "Persist CertificatePolicy::Tofu and require a fresh connection attempt to pin the replacement."
+    cancel_action: "Do not modify the pin or profile; report cancellation rather than a generic process exit code."
+  cli:
+    - "rdp-tui certificate show <profile>"
+    - "rdp-tui certificate trust <profile> --fingerprint <sha256>"
+    - "rdp-tui certificate backups <profile>"
+    - "rdp-tui certificate restore <profile> <backup-id>"
+
+import_contract:
+  accepted_inputs:
+    - "single .rdp file"
+    - "single .remmina file"
+    - "directory containing .remmina files"
+    - "Python rdp-tui profiles.json"
+    - "Rust rdp-tui profiles.toml backup"
+  behavior:
+    - "Directory import is deterministic and sorted."
+    - "An unchanged imported profile is idempotently skipped."
+    - "Passwords are excluded by default."
+    - "Import reports added, updated, skipped, and failed counts separately."
+    - "A non-RDP Remmina profile is skipped with a typed reason rather than aborting unrelated valid entries."
+
+python_migration:
+  command: "rdp-tui migrate python [--config-dir <path>]"
+  source_default: "$XDG_CONFIG_HOME/rdp-tui"
+  field_mapping:
+    name: Profile.name
+    host: Profile.endpoint
+    user_domain: Profile.identity
+    display_fields: Profile.display
+    clipboard_audio_microphone_shared_folder: Profile.devices
+    certificate_admin_network_extra_options: Profile.security
+    gateway_fields: Profile.route.RdGateway
+    ssh_tunnel_host: Profile.route.SshTunnel
+    password_backend_and_id: Profile.credential
+  secret_policy:
+    - "Never decrypt or migrate a secret during ordinary profile import."
+    - "Explicit secret migration requires --with-secrets plus an interactive confirmation unless --yes and a noninteractive destination backend are both supplied."
+    - "Use retrieve -> write -> verify -> persist new CredentialRef -> commit -> delete old."
+    - "If the Python encrypted-file key is unavailable or invalid, preserve the source and report a per-profile failure."
+  source_preservation: "Never edit or delete Python config during migration; write a timestamped migration report under XDG_STATE_HOME."
+
+contract_validation:
+  required:
+    - "Every YAML file declares schema_version."
+    - "CI parses all YAML files and rejects duplicate mapping keys."
+    - "Every dependency-graph edge references a declared module and the graph is acyclic."
+    - "Every INV-*, DEC-*, AP-*, and GAP-* identifier is unique and every cross-reference resolves."
+    - "Every binding type referenced by 01-types.yaml or 04-amendments.yaml is defined or explicitly marked external/std."
+    - "The original source ZIP SHA-256 remains d716591ace6b17956a5a2c24f65e4b1e73cda42a7d7153d27954a366fff2660b."
+  implementation: "cargo test --test architecture_contract invokes config::contract validation"
+
+test_matrix_additions:
+  session_supervisor:
+    - launcher_dies_supervisor_keeps_session_and_tunnel_alive
+    - freerdp_exits_after_launcher_death_supervisor_reaps_tunnel_and_registry
+    - supervisor_crash_is_reported_without_pid_only_cleanup
+  credentials:
+    - credential_lease_debug_is_redacted
+    - credential_lease_zeroizes_on_drop
+    - askpass_uses_sealed_memfd_and_no_secret_argv_or_environment_value
+  certificates:
+    - tofu_first_connection_pins
+    - tofu_matching_connection_succeeds
+    - changed_certificate_live_monitor_interrupts_hidden_prompt
+    - changed_certificate_dialog_shows_both_fingerprints
+    - cancel_changes_nothing
+    - accept_archives_old_pin_mode_0600_and_requires_reconnect
+    - cli_trust_requires_exact_presented_fingerprint
+  imports:
+    - remmina_directory_sorted_and_idempotent
+    - remmina_zero_resolution_is_not_custom_resolution
+    - remmina_sound_local_maps_to_audio_playback
+    - python_json_field_mapping
+    - migration_without_secrets_never_reads_secret_values
+    - explicit_secret_migration_preserves_source_on_failure
+  contract:
+    - yaml_duplicate_keys_rejected
+    - module_graph_is_declared_and_acyclic
+    - stable_ids_unique_and_resolved
+    - binding_type_references_resolved
