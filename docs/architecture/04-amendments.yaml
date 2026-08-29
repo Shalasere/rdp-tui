@@ -162,10 +162,6 @@ binding_type_additions:
   DiscoveredProcess: "{identity: ProcessIdentity, observed_state: ProcessObservedState}"
   ProcessObservedState: "enum [StillRunning, Unowned, Stale]"
 
-profile_shape_amendment:
-  add_field: "advanced: AdvancedOverrides"
-  note: "All other Profile fields remain as declared in 01-types.yaml."
-
 certificate_contract:
   default_policy: Tofu
   system_semantics: "Use platform/FreeRDP trust behavior; may require interaction and must never be used with a renderer that hides prompts without an rdp-tui mediation path."

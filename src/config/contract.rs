@@ -388,14 +388,6 @@ fn validate_binding_types(
     for definition in definitions.values() {
         collect_type_references(definition, &known, &mut referenced);
     }
-    if let Ok(profile_shape) = mapping_value(amendments, "profile_shape_amendment")
-        && let Some(add_field) = profile_shape
-            .as_mapping()
-            .and_then(|mapping| mapping.get(Value::String("add_field".into())))
-            .and_then(Value::as_str)
-    {
-        collect_expression_types(add_field, &known, &mut referenced);
-    }
     for reference in referenced {
         if !known.contains(&reference) {
             push_error(
