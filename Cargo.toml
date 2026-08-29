@@ -1,0 +1,23 @@
+[package]
+name = "rdp-tui"
+version = "0.2.0-alpha.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Keyboard-driven FreeRDP profile manager"
+license = "MIT"
+repository = "https://github.com/Shalasere/rdp-tui"
+
+[dependencies]
+regex = "1.13.1"
+serde_yaml_ng = "0.10.0"
+sha2 = "0.11.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

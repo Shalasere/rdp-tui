@@ -50,6 +50,10 @@ Leave **Domain** empty for a local account; rdp-tui passes that as an explicit e
 
 ## Development
 
+The daily-use launcher remains the Python implementation during the Rust
+rewrite. The Rust crate currently provides the architecture-contract validator;
+its frontend is intentionally not active yet.
+
 ```sh
 make setup
 make test

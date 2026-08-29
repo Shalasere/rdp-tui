@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.93.1 --profile minimal --component clippy,rustfmt && rustup default 1.93.1
+      - name: Install Python development environment
+        run: make setup
+      - name: Test
+        run: make test
+      - name: Lint
+        run: make lint
+      - name: Check formatting
+        run: make format-check

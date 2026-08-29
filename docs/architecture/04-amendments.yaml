@@ -93,6 +93,28 @@ credential_pipeline:
   logging: "CredentialLease and AskpassLease Debug implementations are always redacted."
 
 binding_type_additions:
+  external_types:
+    std:
+      - bool
+      - u8
+      - u16
+      - u32
+      - u64
+      - i32
+      - String
+      - PathBuf
+      - Ipv4Addr
+      - Ipv6Addr
+      - Child
+      - Instant
+      - Duration
+      - OwnedFd
+      - Option
+      - Vec
+      - io::Error
+    crates:
+      - semver::Version
+      - secrecy::SecretString
   ids:
     ProfileId: "UUID newtype"
     SessionId: "UUID newtype"
