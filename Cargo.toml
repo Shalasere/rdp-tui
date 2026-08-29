@@ -10,6 +10,7 @@ repository = "https://github.com/Shalasere/rdp-tui"
 [dependencies]
 fs2 = "0.4.3"
 regex = "1.13.1"
+secrecy = "0.10.3"
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_yaml_ng = "0.10.0"

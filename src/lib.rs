@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod credentials;
 pub mod freerdp;
 pub mod model;
 pub mod planner;
