@@ -5,6 +5,7 @@ use crate::config::ConfigStore;
 use crate::config::migrate::import_python_profiles;
 use crate::freerdp::discover::discover;
 use crate::model::{ProfileId, Renderer};
+use crate::planner::plan;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -20,6 +21,7 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [] => list(&store),
         [command] if command == "list" => list(&store),
         [command, id] if command == "show" => show(&store, id),
+        [command, id] if command == "inspect" => inspect(&store, id),
         [command] if command == "validate" => validate(&store),
         [command] if command == "config-paths" => Ok(format!(
             "config.toml: {}\nprofiles.toml: {}\n",
@@ -36,6 +38,27 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         }
         _ => Err(usage().into()),
     }
+}
+
+fn inspect(store: &ProfileStore, value: &str) -> Result<String, String> {
+    let id = value
+        .parse::<ProfileId>()
+        .map_err(|error| error.to_string())?;
+    let profile = store
+        .get(id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("profile {id} was not found"))?;
+    let discovered = discover(profile.display.renderer)?;
+    let connection = plan(&profile, &discovered.capabilities, discovered.client)
+        .map_err(|error| format!("cannot inspect profile: {error:?}"))?;
+    Ok(format!(
+        "profile: {}\ntarget: {}\nroute: {:?}\nclient: {} {}\n",
+        profile.name,
+        connection.target,
+        connection.route,
+        connection.client.executable.display(),
+        connection.client.version
+    ))
 }
 
 fn migrate_python(store: &ProfileStore, source: &std::path::Path) -> Result<String, String> {
@@ -102,5 +125,5 @@ fn validate(store: &ProfileStore) -> Result<String, String> {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <profile-id> | validate | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <profile-id> | inspect <profile-id> | validate | config-paths | info | doctor | migrate python [profiles.json]]"
 }

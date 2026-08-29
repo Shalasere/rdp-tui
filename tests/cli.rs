@@ -53,3 +53,26 @@ fn python_migration_upserts_profiles_without_modifying_the_source() {
     assert_eq!(std::fs::read_to_string(source).unwrap(), json);
     assert!(run(&["list".into()], &root).unwrap().contains("Anima"));
 }
+
+#[test]
+fn inspect_reports_a_plan_without_preparing_a_connection() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().to_path_buf();
+    std::fs::write(root.join("legacy.json"), r#"[{"id":"550e8400-e29b-41d4-a716-446655440000","name":"Anima","host":"10.0.0.111","renderer":"x11"}]"#).unwrap();
+    run(
+        &["migrate".into(), "python".into(), "legacy.json".into()],
+        &root,
+    )
+    .unwrap();
+    let output = run(
+        &[
+            "inspect".into(),
+            "550e8400-e29b-41d4-a716-446655440000".into(),
+        ],
+        &root,
+    )
+    .unwrap();
+    assert!(output.contains("profile: Anima"));
+    assert!(output.contains("target: 10.0.0.111:3389"));
+    assert!(!root.join("sessions").exists());
+}
