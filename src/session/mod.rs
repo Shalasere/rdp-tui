@@ -9,8 +9,8 @@ use crate::credentials::{CredentialError, CredentialStore, acquire};
 use crate::freerdp::discover::discover;
 use crate::freerdp::process::launch;
 use crate::model::{
-    ConnectionFailure, ConnectionPlan, PreparedConnection, Profile, RouteHandle, SessionId,
-    SessionResult,
+    ConnectionFailure, ConnectionPlan, PreparedConnection, Profile, Renderer, RouteHandle,
+    SessionId, SessionResult,
 };
 use crate::planner::plan;
 use crate::preflight::{prepare_for_session, verify_prepared};
@@ -133,10 +133,49 @@ fn run_with_askpass(
 /// Returns [`ConnectError`] when the profile cannot be planned or the detached
 /// supervisor cannot be spawned.
 pub fn connect_profile(profile: &Profile, executable: &Path) -> Result<SessionId, ConnectError> {
-    let plan = plan_profile(profile)?;
+    let mut plan = plan_profile(profile)?;
+    fill_sdl_fullscreen_size(&mut plan);
     let session = SessionId::generate();
     launcher::spawn_supervisor(&plan, profile.id, session, executable).map_err(ConnectError::Io)?;
     Ok(session)
+}
+
+/// SDL fullscreen cannot use `FreeRDP`'s `/f` (it reads a 64x64 monitor and fails
+/// pre-connect), so give it the focused monitor's resolution as an explicit
+/// `/size`, matching the Python client. Falls back to 1920x1080 if the monitor
+/// cannot be detected. Runs in the graphical launcher, before the plan is sent
+/// to the detached supervisor.
+fn fill_sdl_fullscreen_size(plan: &mut ConnectionPlan) {
+    if plan.display.fullscreen
+        && matches!(plan.client.renderer, Renderer::WaylandSdl)
+        && plan.display.resolution.is_none()
+    {
+        plan.display.resolution = Some(detect_primary_resolution().unwrap_or((1920, 1080)));
+    }
+}
+
+/// Return the focused Hyprland monitor's physical resolution via `hyprctl`.
+fn detect_primary_resolution() -> Option<(u16, u16)> {
+    let output = std::process::Command::new("hyprctl")
+        .args(["monitors", "-j"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let monitors: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let list = monitors.as_array()?;
+    let monitor = list
+        .iter()
+        .find(|entry| entry.get("focused").and_then(serde_json::Value::as_bool) == Some(true))
+        .or_else(|| list.first())?;
+    let width = u16::try_from(monitor.get("width")?.as_u64()?).ok()?;
+    let height = u16::try_from(monitor.get("height")?.as_u64()?).ok()?;
+    if (200..=16_384).contains(&width) && (200..=16_384).contains(&height) {
+        Some((width, height))
+    } else {
+        None
+    }
 }
 
 /// One-shot reachability check: acquire the route, verify the same prepared

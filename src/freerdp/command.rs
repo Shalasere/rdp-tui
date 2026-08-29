@@ -1,4 +1,4 @@
-use crate::model::{CertificatePolicy, NetworkProfile, PlannedRoute, PreparedConnection};
+use crate::model::{CertificatePolicy, NetworkProfile, PlannedRoute, PreparedConnection, Renderer};
 use std::ffi::OsString;
 use std::path::PathBuf;
 /// Build `FreeRDP` argv only; credentials are deliberately not rendered into argv.
@@ -15,7 +15,10 @@ pub fn build_command(
     if plan.identity.domain.is_empty() {
         args.push("/auth-pkg-list:none,ntlm".into());
     }
-    if plan.display.fullscreen {
+    // Only X11 uses FreeRDP's /f. The SDL client reports a 64x64 monitor before
+    // its Wayland surface is sized and fails pre-connect, so connect() supplies
+    // an explicit /size for SDL fullscreen instead (matching the Python client).
+    if plan.display.fullscreen && matches!(plan.client.renderer, Renderer::X11) {
         args.push("/f".into());
     }
     if plan.devices.clipboard {
@@ -65,6 +68,11 @@ pub fn build_command(
     }
     if let Some(depth) = plan.display.color_depth {
         args.push(format!("/bpp:{depth}").into());
+    }
+    if matches!(plan.client.renderer, Renderer::WaylandSdl) {
+        // Leave compositor shortcuts and touchpad gestures with Hyprland.
+        args.push("-grab-keyboard".into());
+        args.push("-grab-mouse".into());
     }
     args.extend(
         plan.security

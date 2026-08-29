@@ -39,6 +39,8 @@ fn command_uses_prepared_endpoint_and_never_credential_references() {
     assert!(args.contains(&"/cert:tofu".into()));
     assert!(args.contains(&"/multimon".into()));
     assert!(args.contains(&"/size:1920x1080".into()));
+    // X11 fullscreen still uses FreeRDP's own /f.
+    assert!(args.contains(&"/f".into()));
     assert!(environment.is_empty());
 }
 
@@ -93,4 +95,38 @@ fn command_renders_supported_profile_settings() {
         );
     }
     assert!(!args.contains(&"/multimon".into()));
+}
+
+#[test]
+fn sdl_fullscreen_uses_explicit_size_not_the_fullscreen_flag() {
+    let mut plan = ConnectionPlan {
+        target: "anima:3389".parse().unwrap(),
+        route: PlannedRoute::Direct,
+        identity: IdentityConfig::default(),
+        display: DisplayConfig::default(),
+        devices: DeviceConfig::default(),
+        security: SecurityConfig::default(),
+        credentials: ResolvedCredentials::default(),
+        client: FreeRdpClient {
+            executable: PathBuf::from("sdl-freerdp3"),
+            renderer: Renderer::WaylandSdl,
+            version: Version::new(3, 30, 0),
+        },
+    };
+    plan.display.fullscreen = true;
+    plan.display.resolution = Some((2560, 1440));
+    let prepared = prepare(&plan).unwrap();
+    let (_, args, _) = build_command(&prepared);
+    let args = args
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>();
+    // SDL must not use /f (it mis-detects a 64x64 monitor); it uses /size instead.
+    assert!(
+        !args.contains(&"/f".into()),
+        "SDL must not use /f: {args:?}"
+    );
+    assert!(args.contains(&"/size:2560x1440".into()));
+    assert!(args.contains(&"-grab-keyboard".into()));
+    assert!(args.contains(&"-grab-mouse".into()));
 }
