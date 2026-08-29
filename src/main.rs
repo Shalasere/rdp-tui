@@ -27,6 +27,15 @@ fn main() -> ExitCode {
             }
         };
     }
+    if arguments.first().is_some_and(|argument| argument == "tui") {
+        return match rdp_tui::tui::run(&config_root()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("rdp-tui: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match rdp_tui::cli::commands::run(&arguments, &config_root()) {
         Ok(output) => {
             print!("{output}");

@@ -4,11 +4,9 @@ use crate::ProfileStore;
 use crate::config::ConfigStore;
 use crate::config::migrate::import_python_profiles;
 use crate::freerdp::discover::discover;
-use crate::model::{ConnectionPlan, Profile, ProfileId, Renderer, RouteHandle, SessionId};
+use crate::model::{ConnectionPlan, Profile, ProfileId, Renderer};
 use crate::planner::plan;
-use crate::preflight::{prepare_for_session, verify_prepared};
-use crate::session::launcher::spawn_supervisor;
-use crate::ssh::tunnel::terminate;
+use crate::session::{connect_profile, test_profile};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -57,15 +55,11 @@ fn load_profile(store: &ProfileStore, value: &str) -> Result<Profile, String> {
         .ok_or_else(|| format!("profile {id} was not found"))
 }
 
-fn plan_for(profile: &Profile) -> Result<ConnectionPlan, String> {
-    let discovered = discover(profile.display.renderer)?;
-    plan(profile, &discovered.capabilities, discovered.client)
-        .map_err(|error| format!("cannot plan connection: {error:?}"))
-}
-
 fn inspect(store: &ProfileStore, value: &str) -> Result<String, String> {
     let profile = load_profile(store, value)?;
-    let connection = plan_for(&profile)?;
+    let discovered = discover(profile.display.renderer)?;
+    let connection: ConnectionPlan = plan(&profile, &discovered.capabilities, discovered.client)
+        .map_err(|error| format!("cannot plan connection: {error:?}"))?;
     Ok(format!(
         "profile: {}\ntarget: {}\nroute: {:?}\nclient: {} {}\n",
         profile.name,
@@ -78,25 +72,14 @@ fn inspect(store: &ProfileStore, value: &str) -> Result<String, String> {
 
 fn test(store: &ProfileStore, value: &str) -> Result<String, String> {
     let profile = load_profile(store, value)?;
-    let plan = plan_for(&profile)?;
-    let session = SessionId::generate();
-    let mut prepared = prepare_for_session(&plan, session)
-        .map_err(|error| format!("cannot prepare {}: {error:?}", profile.name))?;
-    let reachable = verify_prepared(&prepared, TEST_TIMEOUT);
-    // A standalone test is one-shot: tear the retained tunnel down again.
-    if let Some(RouteHandle::SshTunnel(handle)) = &mut prepared.route_handle {
-        let _ = terminate(handle);
-    }
-    reachable.map_err(|error| format!("{} is not reachable: {error:?}", profile.name))?;
+    test_profile(&profile, TEST_TIMEOUT).map_err(|error| error.to_string())?;
     Ok(format!("test: {} is reachable\n", profile.name))
 }
 
 fn connect(store: &ProfileStore, value: &str) -> Result<String, String> {
     let profile = load_profile(store, value)?;
-    let plan = plan_for(&profile)?;
-    let session = SessionId::generate();
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    spawn_supervisor(&plan, profile.id, session, &executable).map_err(|error| error.to_string())?;
+    let session = connect_profile(&profile, &executable).map_err(|error| error.to_string())?;
     Ok(format!(
         "connect: launched detached session {session} for {}\n",
         profile.name

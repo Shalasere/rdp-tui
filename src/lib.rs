@@ -12,5 +12,6 @@ pub mod runtime;
 pub mod secret;
 pub mod session;
 pub mod ssh;
+pub mod tui;
 
 pub use profile_store::ProfileStore;
