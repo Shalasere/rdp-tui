@@ -2,12 +2,13 @@
 //! process once the launcher has handed it a plan. See the `session_supervisor`
 //! contract in `docs/architecture/04-amendments.yaml`.
 
+use crate::config::ConfigStore;
 use crate::credentials::askpass::AskpassLease;
 use crate::credentials::{CredentialError, CredentialStore, acquire};
 use crate::freerdp::process::launch;
 use crate::model::{
-    ConnectionFailure, ConnectionPlan, FreeRdpClient, PreparedConnection, ProfileId, Renderer,
-    RouteHandle, SessionId, SessionResult,
+    ConnectionFailure, ConnectionPlan, FreeRdpClient, HistoryEntry, PreparedConnection, ProfileId,
+    Renderer, RouteHandle, SessionId, SessionResult,
 };
 use crate::preflight::{prepare_for_session, verify_prepared};
 use crate::runtime::process::{LaunchMode, OwnedChild};
@@ -53,6 +54,7 @@ impl std::error::Error for SuperviseError {}
 ///
 /// Returns [`SuperviseError`] when credentials, preflight, the child process,
 /// or the runtime record cannot be handled.
+#[allow(clippy::too_many_arguments)]
 pub fn supervise(
     plan: &ConnectionPlan,
     profile_id: ProfileId,
@@ -60,6 +62,7 @@ pub fn supervise(
     store: &impl CredentialStore,
     helper: &Path,
     records_dir: &Path,
+    state_dir: &Path,
     preflight_timeout: Duration,
 ) -> Result<SessionResult, SuperviseError> {
     let supervisor =
@@ -75,6 +78,9 @@ pub fn supervise(
         supervisor,
     );
     let _ = record::remove(records_dir, session);
+    if let Ok(result) = &outcome {
+        record_history(state_dir, profile_id, result);
+    }
     outcome
 }
 
@@ -228,6 +234,17 @@ fn tunnel_identity(prepared: &PreparedConnection, session: SessionId) -> Option<
         }
         None => None,
     }
+}
+
+/// Append this session's outcome to the connection history. Best-effort: a
+/// history write must never fail a session that already completed.
+fn record_history(state_dir: &Path, profile_id: ProfileId, result: &SessionResult) {
+    const HISTORY_CAP: usize = 200;
+    let finished_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let entry = HistoryEntry::from_result(profile_id, result, finished_at);
+    let _ = ConfigStore::new(state_dir).record_history(entry, HISTORY_CAP);
 }
 
 #[cfg(test)]

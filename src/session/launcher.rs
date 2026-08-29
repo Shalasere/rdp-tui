@@ -87,6 +87,7 @@ pub fn run_from_environment() -> std::io::Result<()> {
     let helper = std::env::current_exe()?;
     let records = record::sessions_dir()
         .unwrap_or_else(|| std::env::temp_dir().join("rdp-tui").join("sessions"));
+    let state = state_dir();
     supervise(
         &plan,
         profile_id,
@@ -94,6 +95,7 @@ pub fn run_from_environment() -> std::io::Result<()> {
         &store,
         &helper,
         &records,
+        &state,
         PREFLIGHT_TIMEOUT,
     )
     .map(|_result| ())
@@ -122,5 +124,13 @@ fn config_root() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("rdp-tui")
+}
+
+fn state_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("rdp-tui")
 }

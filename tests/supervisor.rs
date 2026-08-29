@@ -54,6 +54,7 @@ fn supervise_runs_a_direct_session_and_clears_its_record() {
         .parse::<ProfileId>()
         .unwrap();
     let records = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
 
     let result = supervise(
         &plan,
@@ -62,6 +63,7 @@ fn supervise_runs_a_direct_session_and_clears_its_record() {
         &NoCredentials,
         Path::new("/usr/bin/rdp-tui"),
         records.path(),
+        state.path(),
         Duration::from_secs(2),
     )
     .unwrap();
@@ -70,6 +72,13 @@ fn supervise_runs_a_direct_session_and_clears_its_record() {
     assert!(result.failure.is_none());
     // The record is cleared once the session ends.
     assert!(read(records.path(), session).unwrap().is_none());
+    // The successful session is appended to the connection history.
+    let history = rdp_tui::config::ConfigStore::new(state.path())
+        .load_history()
+        .unwrap();
+    assert_eq!(history.entries.len(), 1);
+    assert_eq!(history.entries[0].profile_id, profile);
+    assert!(history.entries[0].succeeded());
     drop(listener);
 }
 
@@ -110,6 +119,7 @@ fn supervise_interrupts_a_changed_certificate_and_reports_it() {
         .parse::<ProfileId>()
         .unwrap();
     let records = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
 
     let result = supervise(
         &plan,
@@ -118,6 +128,7 @@ fn supervise_interrupts_a_changed_certificate_and_reports_it() {
         &NoCredentials,
         Path::new("/usr/bin/rdp-tui"),
         records.path(),
+        state.path(),
         Duration::from_secs(2),
     )
     .unwrap();
