@@ -127,6 +127,17 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(backup.read_text(), "old pin")
             self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
 
+    @patch("rdp_tui.app.certificate_fingerprint", return_value="new fingerprint")
+    def test_refuses_to_archive_pin_changed_after_confirmation(self, fingerprint):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            certificate = root / "server.pem"
+            certificate.write_text("changed pin")
+            with self.assertRaisesRegex(ValueError, "changed while confirmation was open"):
+                archive_freerdp_certificate(certificate, root / "backups", expected_fingerprint="old fingerprint")
+            self.assertTrue(certificate.exists())
+            fingerprint.assert_called_once_with(certificate)
+
     def test_atomic_state_writes_are_private_and_leave_no_fixed_temp_file(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"

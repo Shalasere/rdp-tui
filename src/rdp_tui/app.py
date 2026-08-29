@@ -587,8 +587,12 @@ def certificate_fingerprint(path: Path) -> str | None:
     return ":".join(digest[index : index + 2] for index in range(0, len(digest), 2))
 
 
-def archive_freerdp_certificate(path: Path, backup_dir: Path | None = None) -> Path:
-    """Move a stale FreeRDP pin to an owner-only, recoverable backup directory."""
+def archive_freerdp_certificate(
+    path: Path, backup_dir: Path | None = None, expected_fingerprint: str | None = None
+) -> Path:
+    """Move a verified stale FreeRDP pin to an owner-only backup directory."""
+    if expected_fingerprint is not None and certificate_fingerprint(path) != expected_fingerprint:
+        raise ValueError("certificate pin changed while confirmation was open")
     destination_dir = backup_dir or CERTIFICATE_BACKUP_DIR
     destination_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(destination_dir, 0o700)
@@ -1016,12 +1020,14 @@ def run(screen: curses.window) -> None:
             if certificate_change:
                 certificate_path = freerdp_certificate_path(profile.host)
                 pinned_fingerprint = certificate_fingerprint(certificate_path) if certificate_path else None
-                if certificate_path and certificate_path.is_file():
+                if certificate_path and certificate_path.is_file() and pinned_fingerprint:
                     if confirm_certificate_replacement(
                         screen, profile, pinned_fingerprint or "unavailable", certificate_change
                     ):
                         try:
-                            archived = archive_freerdp_certificate(certificate_path)
+                            archived = archive_freerdp_certificate(
+                                certificate_path, expected_fingerprint=pinned_fingerprint
+                            )
                             profile.certificate_policy = "tofu"
                             save_profiles(profiles)
                             message = f"Archived old certificate to {archived}; connect again to pin the replacement."
@@ -1033,13 +1039,15 @@ def run(screen: curses.window) -> None:
                                 certificate_change,
                                 archived,
                             )
-                        except OSError as exc:
+                        except (OSError, ValueError) as exc:
                             message = f"Could not archive the old certificate: {exc}"
                             LOGGER.exception("Could not archive changed RDP certificate for host=%r", profile.host)
                     else:
                         message = "Certificate replacement canceled; no trust settings were changed."
                 elif not certificate_path or not certificate_path.is_file():
                     message = "Certificate changed, but rdp-tui could not locate the existing FreeRDP certificate pin."
+                else:
+                    message = "Certificate changed, but the existing pin could not be fingerprinted; no trust settings changed."
 
 
 def main() -> None:
