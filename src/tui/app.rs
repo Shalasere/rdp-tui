@@ -462,6 +462,7 @@ impl App {
             KeyCode::Char('x') => self.begin_export(),
             KeyCode::Char('s') => self.begin_status(),
             KeyCode::Char('h') => self.begin_history(),
+            KeyCode::Char('?') => self.begin_help(),
             _ => {}
         }
         false
@@ -930,6 +931,32 @@ impl App {
         self.mode = Mode::Status(text);
     }
 
+    fn begin_help(&mut self) {
+        let mut text = String::from("Keys (any key returns):\n\n");
+        for (key, description) in [
+            ("Up/Down, j/k", "move selection"),
+            ("Enter", "connect"),
+            ("a", "add a profile"),
+            ("e", "edit selected profile"),
+            ("c", "clone"),
+            ("d", "delete (type yes)"),
+            ("f, /", "find / filter"),
+            ("i", "import (Remmina/.rdp/dir)"),
+            ("x", "export to .rdp"),
+            ("s", "status"),
+            ("h", "connection history"),
+            ("D", "deep-test credentials"),
+            ("p", "set / clear password"),
+            ("t", "reachability test"),
+            ("?", "this help"),
+            ("q, Esc", "quit"),
+        ] {
+            let _ = writeln!(text, "  {key:<14} {description}");
+        }
+        text.push_str("\nEdit form: Up/Down move, Enter/Space edit, A accept, Esc cancel");
+        self.mode = Mode::Status(text);
+    }
+
     fn connect(&mut self) {
         let Some(profile) = self.current().cloned() else {
             return;
@@ -1098,7 +1125,7 @@ impl App {
 
         let (title, body) = match &self.mode {
             Mode::Browsing => (
-                " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · h history · t test · D deep-test · p pass · q quit ".to_string(),
+                " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · h history · t test · D deep-test · p pass · ? help · q quit ".to_string(),
                 self.status.clone(),
             ),
             Mode::Password(input) => (
@@ -1521,6 +1548,16 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn help_overlay_lists_the_keys() {
+        let mut app = app_with(&["Anima"]);
+        app.handle_browsing(press(KeyCode::Char('?')));
+        assert!(matches!(app.mode, Mode::Status(_)));
+        let screen = rendered(&mut app, 80, 24);
+        assert!(screen.contains("add a profile"));
+        assert!(screen.contains("connection history"));
     }
 
     #[test]
