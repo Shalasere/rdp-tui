@@ -325,6 +325,12 @@ fn deep_test_message(outcome: crate::session::DeepTest) -> &'static str {
     }
 }
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
 fn state_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -455,6 +461,7 @@ impl App {
             KeyCode::Char('i') => self.begin_import(),
             KeyCode::Char('x') => self.begin_export(),
             KeyCode::Char('s') => self.begin_status(),
+            KeyCode::Char('h') => self.begin_history(),
             _ => {}
         }
         false
@@ -835,6 +842,10 @@ impl App {
     }
 
     fn begin_status(&mut self) {
+        let now = now_secs();
+        let history = ConfigStore::new(state_dir())
+            .load_history()
+            .unwrap_or_default();
         let mut text = String::new();
         if let Some(profile) = self.current() {
             let _ = writeln!(text, "Profile: {}", profile.name);
@@ -856,6 +867,20 @@ impl App {
                     "none"
                 }
             );
+            if let Some(entry) = history
+                .entries
+                .iter()
+                .rev()
+                .find(|entry| entry.profile_id == profile.id)
+            {
+                let _ = writeln!(
+                    text,
+                    "Last session: {}",
+                    entry.summarize(&profile.name, now)
+                );
+            } else {
+                let _ = writeln!(text, "Last session: never");
+            }
         } else {
             let _ = writeln!(text, "No profile selected.");
         }
@@ -873,6 +898,34 @@ impl App {
         }
         if !any {
             let _ = writeln!(text, "  none active");
+        }
+        self.mode = Mode::Status(text);
+    }
+
+    fn begin_history(&mut self) {
+        let now = now_secs();
+        let history = ConfigStore::new(state_dir())
+            .load_history()
+            .unwrap_or_default();
+        let mut text = String::from("Recent connections (any key returns):\n");
+        let mut shown = 0_usize;
+        for entry in history.entries.iter().rev() {
+            let name = self
+                .profiles
+                .iter()
+                .find(|profile| profile.id == entry.profile_id)
+                .map_or_else(
+                    || format!("(removed {})", entry.profile_id),
+                    |profile| profile.name.clone(),
+                );
+            let _ = writeln!(text, "  {}", entry.summarize(&name, now));
+            shown += 1;
+            if shown >= 15 {
+                break;
+            }
+        }
+        if shown == 0 {
+            text.push_str("  none yet\n");
         }
         self.mode = Mode::Status(text);
     }
@@ -1045,7 +1098,7 @@ impl App {
 
         let (title, body) = match &self.mode {
             Mode::Browsing => (
-                " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · t test · D deep-test · p pass · q quit ".to_string(),
+                " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · h history · t test · D deep-test · p pass · q quit ".to_string(),
                 self.status.clone(),
             ),
             Mode::Password(input) => (
@@ -1468,6 +1521,14 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn history_overlay_opens_with_a_header() {
+        let mut app = app_with(&["Anima"]);
+        app.handle_browsing(press(KeyCode::Char('h')));
+        assert!(matches!(app.mode, Mode::Status(_)));
+        assert!(rendered(&mut app, 80, 24).contains("Recent connections"));
     }
 
     #[test]
