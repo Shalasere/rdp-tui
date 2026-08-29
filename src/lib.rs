@@ -1,5 +1,6 @@
 //! Core library for the Rust rewrite of `rdp-tui`.
 
+pub mod cli;
 pub mod config;
 pub mod model;
 pub mod profile_store;
