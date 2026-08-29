@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 const STARTUP_ATTEMPTS: usize = 20;
 const STARTUP_DELAY: Duration = Duration::from_millis(25);
 
-static IDENTITIES: OnceLock<Mutex<std::collections::HashMap<u32, ProcessIdentity>>> =
+static IDENTITIES: OnceLock<Mutex<std::collections::HashMap<(u32, Instant), ProcessIdentity>>> =
     OnceLock::new();
 
 /// Build the non-interactive SSH command for one retained local forward.
@@ -82,7 +82,8 @@ pub fn establish(
 /// Returns an I/O error only when the verified child cannot be terminated or
 /// reaped. A missing or mismatched identity never causes a kill attempt.
 pub fn terminate(handle: &mut TunnelHandle) -> std::io::Result<()> {
-    let Some(identity) = lock_identities()?.remove(&handle.child.id()) else {
+    let Some(identity) = lock_identities()?.remove(&(handle.child.id(), handle.established_at))
+    else {
         return Ok(());
     };
     if still_matches(identity) {
@@ -108,13 +109,14 @@ fn establish_with(
     process.args(command(jump_host, port, target));
     let child =
         spawn_child(&mut process, ChildKind::Tunnel, session).map_err(TunnelError::Spawn)?;
+    let established_at = Instant::now();
     lock_identities()
         .map_err(TunnelError::Spawn)?
-        .insert(child.identity.pid, child.identity);
+        .insert((child.identity.pid, established_at), child.identity);
     let mut handle = TunnelHandle {
         child: child.child,
         local_endpoint,
-        established_at: Instant::now(),
+        established_at,
     };
     match wait_for_listener(&mut handle) {
         Ok(()) => Ok(handle),
@@ -152,12 +154,13 @@ fn wait_for_listener(handle: &mut TunnelHandle) -> Result<(), TunnelError> {
     Err(TunnelError::ListenerUnavailable)
 }
 
-fn identities() -> &'static Mutex<std::collections::HashMap<u32, ProcessIdentity>> {
+fn identities() -> &'static Mutex<std::collections::HashMap<(u32, Instant), ProcessIdentity>> {
     IDENTITIES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 fn lock_identities()
--> std::io::Result<MutexGuard<'static, std::collections::HashMap<u32, ProcessIdentity>>> {
+-> std::io::Result<MutexGuard<'static, std::collections::HashMap<(u32, Instant), ProcessIdentity>>>
+{
     identities()
         .lock()
         .map_err(|_| std::io::Error::other("SSH tunnel identity registry is unavailable"))
