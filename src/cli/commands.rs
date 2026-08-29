@@ -4,6 +4,7 @@ use crate::ProfileStore;
 use crate::config::ConfigStore;
 use crate::config::migrate::import_python_profiles;
 use crate::credentials::{forget_encrypted, store_encrypted_password};
+use crate::freerdp::capabilities::AuthOnlySupport;
 use crate::freerdp::certificate;
 use crate::freerdp::discover::discover;
 use crate::model::{CertificatePolicy, ConnectionPlan, Profile, ProfileId, Renderer};
@@ -30,6 +31,7 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [command, id] if command == "inspect" => inspect(&store, id),
         [command] if command == "validate" => validate(&store),
         [command, id] if command == "test" => test(&store, id),
+        [command, id] if command == "deep-test" => deep_test(&store, id),
         [command, id] if command == "connect" => connect(&store, id),
         [command, sub, id] if command == "credential" && sub == "set" => {
             credential_set(&store, config_root, id)
@@ -404,11 +406,52 @@ fn show(store: &ProfileStore, value: &str) -> Result<String, String> {
 
 fn validate(store: &ProfileStore) -> Result<String, String> {
     let profiles = store.list().map_err(|error| error.to_string())?;
-    Ok(format!("valid: {} profile(s)\n", profiles.len()))
+    let mut output = String::new();
+    let mut issues = 0_usize;
+    for profile in &profiles {
+        match validate_profile(profile) {
+            Ok(()) => writeln!(output, "{}: ok", profile.name),
+            Err(reason) => {
+                issues += 1;
+                writeln!(output, "{}: {reason}", profile.name)
+            }
+        }
+        .expect("writing to a String cannot fail");
+    }
+    writeln!(
+        output,
+        "{} profile(s) checked, {issues} with issues",
+        profiles.len()
+    )
+    .expect("writing to a String cannot fail");
+    Ok(output)
+}
+
+fn validate_profile(profile: &Profile) -> Result<(), String> {
+    let discovered =
+        discover(profile.display.renderer).map_err(|_| "FreeRDP unavailable".to_string())?;
+    plan(profile, &discovered.capabilities, discovered.client)
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"))
+}
+
+fn deep_test(store: &ProfileStore, value: &str) -> Result<String, String> {
+    let profile = load_profile(store, value)?;
+    let discovered = discover(profile.display.renderer)?;
+    // Deep-test only runs auth-only when it is version-validated (DEC-deep-test);
+    // it is never automatic and never falls back to a silent real auth attempt.
+    let message = match discovered.capabilities.auth_only {
+        AuthOnlySupport::Validated => "auth-only deep-test is available",
+        AuthOnlySupport::NotSupported => "not supported by this FreeRDP build",
+        AuthOnlySupport::Unvalidated => {
+            "unavailable — FreeRDP auth-only behaviour is not validated for this version; use `test` for reachability"
+        }
+    };
+    Ok(format!("deep-test: {} — {message}\n", profile.name))
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | connect <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> | connect <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | config-paths | info | doctor | migrate python [profiles.json]]"
 }
 
 #[cfg(test)]

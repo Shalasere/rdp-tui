@@ -8,7 +8,7 @@ fn empty_store_has_inspection_commands_and_reports_validation() {
     assert_eq!(run(&[], &root).expect("list"), "");
     assert_eq!(
         run(&["validate".into()], &root).expect("validate"),
-        "valid: 0 profile(s)\n"
+        "0 profile(s) checked, 0 with issues\n"
     );
     let paths = run(&["config-paths".into()], &root).expect("paths");
     assert!(paths.contains("config.toml"));
