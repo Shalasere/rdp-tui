@@ -6,9 +6,11 @@ use crate::config::migrate::import_python_profiles;
 use crate::freerdp::discover::discover;
 use crate::model::{ConnectionPlan, Profile, ProfileId, Renderer};
 use crate::planner::plan;
+use crate::secret::file::EncryptedFileStore;
 use crate::session::{connect_profile, test_profile};
+use secrecy::SecretString;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -28,6 +30,12 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [command] if command == "validate" => validate(&store),
         [command, id] if command == "test" => test(&store, id),
         [command, id] if command == "connect" => connect(&store, id),
+        [command, sub, id] if command == "credential" && sub == "set" => {
+            credential_set(&store, config_root, id)
+        }
+        [command, sub, id] if command == "credential" && sub == "clear" => {
+            credential_clear(&store, config_root, id)
+        }
         [command] if command == "config-paths" => Ok(format!(
             "config.toml: {}\nprofiles.toml: {}\n",
             config_root.join("config.toml").display(),
@@ -84,6 +92,61 @@ fn connect(store: &ProfileStore, value: &str) -> Result<String, String> {
         "connect: launched detached session {session} for {}\n",
         profile.name
     ))
+}
+
+fn credential_set(store: &ProfileStore, config_root: &Path, value: &str) -> Result<String, String> {
+    let profile = load_profile(store, value)?;
+    let name = profile.name.clone();
+    let mut password = String::new();
+    std::io::stdin()
+        .read_line(&mut password)
+        .map_err(|error| error.to_string())?;
+    let password = password.trim_end_matches(['\n', '\r']);
+    if password.is_empty() {
+        return Err("no password was provided on stdin".into());
+    }
+    set_profile_credential(store, config_root, profile, password)?;
+    Ok(format!("credential: stored a password for {name}\n"))
+}
+
+fn credential_clear(
+    store: &ProfileStore,
+    config_root: &Path,
+    value: &str,
+) -> Result<String, String> {
+    let mut profile = load_profile(store, value)?;
+    let Some(reference) = profile.credential.take() else {
+        return Ok(format!("credential: {} had none to clear\n", profile.name));
+    };
+    let name = profile.name.clone();
+    store.upsert(profile).map_err(|error| error.to_string())?;
+    let _ = EncryptedFileStore::new(config_root).delete(reference);
+    Ok(format!("credential: cleared the password for {name}\n"))
+}
+
+/// Store `password` in the encrypted-file backend and pin the resulting concrete
+/// `CredentialRef` on the profile (INV-4). Any previously pinned secret is
+/// removed on a best-effort basis.
+///
+/// # Errors
+///
+/// Returns an error when the secret cannot be stored or the profile saved.
+pub fn set_profile_credential(
+    store: &ProfileStore,
+    config_root: &Path,
+    mut profile: Profile,
+    password: &str,
+) -> Result<(), String> {
+    let backend = EncryptedFileStore::new(config_root);
+    let reference = backend
+        .store(&SecretString::from(password.to_owned()))
+        .map_err(|error| error.to_string())?;
+    let previous = profile.credential.replace(reference);
+    store.upsert(profile).map_err(|error| error.to_string())?;
+    if let Some(previous) = previous {
+        let _ = backend.delete(previous);
+    }
+    Ok(())
 }
 
 fn migrate_python(store: &ProfileStore, source: &std::path::Path) -> Result<String, String> {
@@ -159,5 +222,55 @@ fn validate(store: &ProfileStore) -> Result<String, String> {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | connect <id> | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | connect <id> | credential set|clear <id> | config-paths | info | doctor | migrate python [profiles.json]]"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProfileStore, set_profile_credential};
+    use crate::config::ConfigStore;
+    use crate::credentials::CredentialStore as _;
+    use crate::model::{
+        CredentialBackend, DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile,
+        ProfileId, Route, SecurityConfig,
+    };
+    use crate::secret::file::EncryptedFileStore;
+    use secrecy::ExposeSecret as _;
+    use tempfile::TempDir;
+
+    fn sample_profile() -> Profile {
+        Profile {
+            id: ProfileId::generate(),
+            name: "Sample".into(),
+            endpoint: "10.0.0.5:3389".parse::<Endpoint>().unwrap(),
+            identity: IdentityConfig::default(),
+            route: Route::Direct,
+            display: DisplayConfig::default(),
+            devices: DeviceConfig::default(),
+            security: SecurityConfig::default(),
+            credential: None,
+        }
+    }
+
+    #[test]
+    fn setting_a_credential_pins_an_encrypted_file_reference_that_retrieves() {
+        let dir = TempDir::new().unwrap();
+        let config_root = dir.path().to_path_buf();
+        let store = ProfileStore::new(ConfigStore::new(&config_root));
+        let profile = sample_profile();
+        let id = profile.id;
+        store.upsert(profile.clone()).unwrap();
+
+        set_profile_credential(&store, &config_root, profile, "hunter2").unwrap();
+
+        let saved = store.get(id).unwrap().unwrap();
+        let reference = saved
+            .credential
+            .expect("credential is pinned on the profile");
+        assert_eq!(reference.backend, CredentialBackend::EncryptedFile);
+        let secret = EncryptedFileStore::new(config_root.as_path())
+            .retrieve(reference)
+            .unwrap();
+        assert_eq!(secret.expose_secret(), "hunter2");
+    }
 }
