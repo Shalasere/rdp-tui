@@ -74,7 +74,10 @@ pub fn validate_architecture_contract(
 
     let graph = match merged_module_graph(manifest, amendments) {
         Ok(graph) => {
-            validate_module_graph(&graph, &mut errors);
+            match mapping_value(manifest, "forbidden_edges").and_then(parse_forbidden_edges) {
+                Ok(forbidden_edges) => validate_module_graph(&graph, &forbidden_edges, &mut errors),
+                Err(message) => push_error(&mut errors, "forbidden_edges", message),
+            }
             graph
         }
         Err(message) => {
@@ -97,6 +100,23 @@ pub fn validate_architecture_contract(
     } else {
         Err(ContractErrors(errors))
     }
+}
+
+fn parse_forbidden_edges(value: &Value) -> Result<BTreeSet<(String, String)>, String> {
+    let edges = value
+        .as_sequence()
+        .ok_or_else(|| "forbidden_edges must be a sequence".to_owned())?;
+    let mut parsed = BTreeSet::new();
+    for edge in edges {
+        let from = mapping_value(edge, "from")?
+            .as_str()
+            .ok_or_else(|| "forbidden edge 'from' must be a string".to_owned())?;
+        let to = mapping_value(edge, "to")?
+            .as_str()
+            .ok_or_else(|| "forbidden edge 'to' must be a string".to_owned())?;
+        parsed.insert((from.to_owned(), to.to_owned()));
+    }
+    Ok(parsed)
 }
 
 fn load_documents(contract_dir: &Path, errors: &mut Vec<ContractError>) -> BTreeMap<String, Value> {
@@ -214,7 +234,11 @@ fn parse_graph(value: &Value) -> Result<BTreeMap<String, Vec<String>>, String> {
     Ok(graph)
 }
 
-fn validate_module_graph(graph: &BTreeMap<String, Vec<String>>, errors: &mut Vec<ContractError>) {
+fn validate_module_graph(
+    graph: &BTreeMap<String, Vec<String>>,
+    forbidden_edges: &BTreeSet<(String, String)>,
+    errors: &mut Vec<ContractError>,
+) {
     for (module, dependencies) in graph {
         for dependency in dependencies {
             if !graph.contains_key(dependency) {
@@ -222,6 +246,13 @@ fn validate_module_graph(graph: &BTreeMap<String, Vec<String>>, errors: &mut Vec
                     errors,
                     "module_dependency_graph",
                     format!("{module:?} depends on undeclared module {dependency:?}"),
+                );
+            }
+            if forbidden_edges.contains(&(module.clone(), dependency.clone())) {
+                push_error(
+                    errors,
+                    "module_dependency_graph",
+                    format!("forbidden dependency edge: {module} -> {dependency}"),
                 );
             }
         }

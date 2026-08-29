@@ -36,6 +36,7 @@ resolved_gaps:
     resolution: versioned_yaml_and_ci_contract_validator
 
 module_graph_amendments:
+  constraint: merged graph must not contain any edge declared in 00-manifest.yaml forbidden_edges
   add_module:
     session: [model, planner, credentials, preflight, freerdp, ssh, config, runtime]
   replace_dependencies:

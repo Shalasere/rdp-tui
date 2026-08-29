@@ -83,7 +83,13 @@ fn unsafe_advanced_overrides_are_rejected() {
         "/p:plaintext",
         "/gateway-password:plaintext",
         "/auth-only",
+        "+auth-only",
         "/shell:cmd.exe",
+        "/cert:ignore",
+        "/proxy:user:password@proxy.example.test",
+        "/assistance:password",
+        "/endpointfedauth:token",
+        "/port:3390",
         "xfreerdp3",
     ] {
         let mut invalid = profile();
@@ -101,6 +107,18 @@ fn unsafe_advanced_overrides_are_rejected() {
             "{argument} was not rejected"
         );
     }
+}
+
+#[test]
+fn safe_advanced_overrides_are_accepted() {
+    let mut valid = profile();
+    valid.security.advanced.freerdp_args = vec!["/gfx:avc444".into(), "+auto-reconnect".into()];
+    let document = ProfilesDocument {
+        version: 1,
+        profiles: vec![valid],
+    };
+    parse_profiles_document(&toml::to_string_pretty(&document).unwrap())
+        .expect("safe overrides should be accepted");
 }
 
 #[test]

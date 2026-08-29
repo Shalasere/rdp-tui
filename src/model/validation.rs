@@ -148,13 +148,16 @@ fn validate_advanced(overrides: &AdvancedOverrides, issues: &mut Vec<ProfileVali
         } else if is_managed_freerdp_switch(&normalized) {
             issues.push(ProfileValidationIssue::new(
                 path,
-                "target, identity, credential, auth-only, and remote-shell switches are managed fields",
+                "target, identity, credential, certificate, auth-only, and remote-shell switches are managed fields",
             ));
         }
     }
 }
 
 fn is_managed_freerdp_switch(argument: &str) -> bool {
+    if matches!(argument, "+auth-only" | "-auth-only") {
+        return true;
+    }
     let Some(argument) = argument.strip_prefix('/') else {
         return false;
     };
@@ -164,6 +167,8 @@ fn is_managed_freerdp_switch(argument: &str) -> bool {
     matches!(
         name,
         "v" | "server"
+            | "port"
+            | "server-name"
             | "u"
             | "username"
             | "d"
@@ -179,6 +184,7 @@ fn is_managed_freerdp_switch(argument: &str) -> bool {
             | "gateway-domain"
             | "gp"
             | "gateway-password"
+            | "gateway-usage-method"
             | "auth-only"
             | "from-stdin"
             | "args-from"
@@ -187,5 +193,10 @@ fn is_managed_freerdp_switch(argument: &str) -> bool {
             | "app"
             | "app-cmd"
             | "load-balance-info"
+            | "assistance"
+            | "endpointfedauth"
+            | "proxy"
+            | "cert"
+            | "smartcard-logon"
     )
 }

@@ -78,20 +78,39 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(certificate_change_fingerprint(output), fingerprint.upper())
         self.assertIsNone(certificate_change_fingerprint(f"The fingerprint is {fingerprint}"))
 
-    @patch("rdp_tui.app.log_output_since")
-    def test_interrupts_hidden_certificate_prompt(self, log_output):
+    def test_interrupts_hidden_certificate_prompt(self):
         fingerprint = ":".join(f"{value:02x}" for value in range(32))
-        log_output.return_value = (
-            "WARNING: NEW HOST IDENTIFICATION!\n"
-            f"The fingerprint for the host key sent by the remote host is {fingerprint}\n"
-        )
-        process = MagicMock()
-        process.poll.return_value = None
-        process.wait.return_value = 130
-        returncode, detected = wait_for_process_or_certificate(process, 0, poll_interval=0)
+        with TemporaryDirectory() as directory:
+            output_path = Path(directory) / "attempt.log"
+            output_path.write_text(
+                "WARNING: NEW HOST IDENTIFICATION!\n"
+                f"The fingerprint for the host key sent by the remote host is {fingerprint}\n"
+            )
+            process = MagicMock()
+            process.poll.return_value = None
+            process.wait.return_value = 130
+            returncode, detected = wait_for_process_or_certificate(process, output_path, poll_interval=0)
         self.assertEqual(returncode, 130)
         self.assertEqual(detected, fingerprint.upper())
         process.send_signal.assert_called_once()
+
+    def test_certificate_monitor_uses_only_attempt_output(self):
+        fingerprint = ":".join(f"{value:02x}" for value in range(32))
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_path = root / "attempt.log"
+            unrelated_path = root / "unrelated.log"
+            output_path.write_text("normal client output\n")
+            unrelated_path.write_text(
+                "WARNING: NEW HOST IDENTIFICATION!\n"
+                f"The fingerprint for the host key sent by the remote host is {fingerprint}\n"
+            )
+            process = MagicMock()
+            process.poll.return_value = 0
+            returncode, detected = wait_for_process_or_certificate(process, output_path, poll_interval=0)
+        self.assertEqual(returncode, 0)
+        self.assertIsNone(detected)
+        process.send_signal.assert_not_called()
 
     def test_locates_and_archives_freerdp_certificate(self):
         with TemporaryDirectory() as directory:
@@ -170,6 +189,20 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("Port must be between 1 and 65535", errors)
         self.assertTrue(any(error.startswith("Extra options are invalid") for error in errors))
         self.assertIn("RDP renderer is invalid", validate_profile(Profile("Bad", "10.0.0.41", renderer="bad")))
+
+    def test_rejects_managed_extra_options(self):
+        for option in (
+            "/p:plaintext",
+            "/cert:ignore",
+            "/proxy:user:password@proxy.example.test",
+            "/assistance:password",
+            "/endpointfedauth:token",
+            "+auth-only",
+        ):
+            profile = Profile("Unsafe", "10.0.0.41", extra_options=option)
+            self.assertTrue(any(error.startswith("Extra options are invalid") for error in validate_profile(profile)))
+            with self.assertRaises(ValueError):
+                command_for(profile)
 
     def test_builds_advanced_rdp_options(self):
         profile = Profile(

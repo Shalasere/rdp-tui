@@ -82,6 +82,24 @@ fn module_cycles_are_rejected() {
 }
 
 #[test]
+fn forbidden_module_edges_are_rejected() {
+    let contract = copied_contract();
+    replace_in_file(
+        &contract.path().join("00-manifest.yaml"),
+        "model: []",
+        "model: [runtime]",
+    );
+
+    let error =
+        validate_architecture_contract(contract.path()).expect_err("forbidden edge must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("forbidden dependency edge: model -> runtime")
+    );
+}
+
+#[test]
 fn unresolved_stable_ids_are_rejected() {
     let contract = copied_contract();
     let path = contract.path().join("03-process.yaml");

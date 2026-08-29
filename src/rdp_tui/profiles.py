@@ -21,6 +21,44 @@ NETWORK_TYPES = {"auto", "modem", "broadband", "broadband-low", "broadband-high"
 CERTIFICATE_POLICIES = {"default", "tofu", "ignore", "deny"}
 COLOR_DEPTHS = {0, 8, 15, 16, 24, 32}
 SCALE_FACTORS = {0, 100, 140, 180}
+# These values are deliberately owned by structured profile fields.  Keeping
+# them out of the escape hatch prevents credentials, routes, certificate
+# policy, or a remote shell from bypassing UI validation and log redaction.
+MANAGED_FREERDP_OPTIONS = {
+    "v",
+    "server",
+    "port",
+    "server-name",
+    "u",
+    "username",
+    "d",
+    "domain",
+    "p",
+    "password",
+    "pth",
+    "g",
+    "gateway",
+    "gu",
+    "gateway-username",
+    "gd",
+    "gateway-domain",
+    "gp",
+    "gateway-password",
+    "gateway-usage-method",
+    "auth-only",
+    "from-stdin",
+    "args-from",
+    "shell",
+    "shell-dir",
+    "app",
+    "app-cmd",
+    "load-balance-info",
+    "assistance",
+    "endpointfedauth",
+    "proxy",
+    "cert",
+    "smartcard-logon",
+}
 
 
 @dataclass
@@ -96,6 +134,21 @@ def freerdp_client(renderer: str = "x11") -> str | None:
     return next((client for client in candidates if shutil.which(client)), None)
 
 
+def extra_options_for(value: str) -> list[str]:
+    """Parse only FreeRDP switches that cannot override managed settings."""
+    options = shlex.split(value)
+    for option in options:
+        normalized = option.lower()
+        if normalized in {"+auth-only", "-auth-only"}:
+            raise ValueError("managed FreeRDP options are not allowed")
+        if not normalized.startswith("/"):
+            continue
+        name = re.split(r"[:=]", normalized[1:], maxsplit=1)[0]
+        if name in MANAGED_FREERDP_OPTIONS:
+            raise ValueError("managed FreeRDP options are not allowed")
+    return options
+
+
 def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution: str = "") -> list[str]:
     command = [client, f"/v:{resolved_host(profile.host)}"]
     if profile.user:
@@ -155,7 +208,7 @@ def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution
     if profile.color_depth:
         command.append(f"/bpp:{profile.color_depth}")
     if profile.extra_options:
-        command.extend(shlex.split(profile.extra_options))
+        command.extend(extra_options_for(profile.extra_options))
     return command
 
 
@@ -215,7 +268,7 @@ def validate_profile(profile: Profile) -> list[str]:
             if not port.isdecimal() or not 1 <= int(port) <= 65535:
                 errors.append("Port must be between 1 and 65535")
     try:
-        shlex.split(profile.extra_options)
+        extra_options_for(profile.extra_options)
     except ValueError as exc:
         errors.append(f"Extra options are invalid: {exc}")
     if profile.resolution:

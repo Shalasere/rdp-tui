@@ -642,11 +642,21 @@ def confirm_certificate_replacement(
             return False
 
 
-def log_output_since(offset: int, path: Path = LOG_PATH) -> str:
-    """Read only the output appended during the current FreeRDP launch."""
+def freerdp_attempt_output_path() -> Path:
+    """Create a private output file for one FreeRDP launch attempt."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE_DIR, 0o700)
+    descriptor, raw_path = tempfile.mkstemp(prefix="freerdp-", suffix=".log", dir=STATE_DIR)
+    os.close(descriptor)
+    path = Path(raw_path)
+    os.chmod(path, 0o600)
+    return path
+
+
+def process_output(path: Path) -> str:
+    """Read output produced only by the supplied FreeRDP launch attempt."""
     try:
         with path.open("rb") as file:
-            file.seek(offset)
             return file.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
@@ -667,11 +677,11 @@ def _stop_certificate_wait(process: subprocess.Popen) -> int:
 
 
 def wait_for_process_or_certificate(
-    process: subprocess.Popen, log_offset: int, poll_interval: float = 0.1
+    process: subprocess.Popen, output_path: Path, poll_interval: float = 0.1
 ) -> tuple[int, str | None]:
     """Wait for FreeRDP while interrupting a hidden changed-certificate prompt."""
     while True:
-        fingerprint = certificate_change_fingerprint(log_output_since(log_offset))
+        fingerprint = certificate_change_fingerprint(process_output(output_path))
         returncode = process.poll()
         if fingerprint:
             if returncode is None:
@@ -869,6 +879,7 @@ def run(screen: curses.window) -> None:
                 LOGGER.exception("Password store failed for profile=%r", profile.name)
                 continue
             askpass_path = None
+            attempt_output_path = None
             environment = None
             certificate_change = None
             if password is not None or gateway_password is not None:
@@ -897,8 +908,8 @@ def run(screen: curses.window) -> None:
                 started = time.monotonic()
                 effective_client, effective_renderer = client, profile.renderer
                 fallback_used = False
-                session_log_start = LOG_PATH.stat().st_size if LOG_PATH.exists() else 0
-                with LOG_PATH.open("a", encoding="utf-8") as output:
+                attempt_output_path = freerdp_attempt_output_path()
+                with attempt_output_path.open("a", encoding="utf-8") as output:
                     if profile.renderer == "wayland_sdl":
                         process = subprocess.Popen(
                             command,
@@ -909,7 +920,7 @@ def run(screen: curses.window) -> None:
                         )
                         LOGGER.info("Started SDL RDP process pid=%d; waiting for mapped Wayland window", process.pid)
                         fullscreened = profile.fullscreen and fullscreen_wayland_sdl_window(process.pid)
-                        returncode, certificate_change = wait_for_process_or_certificate(process, session_log_start)
+                        returncode, certificate_change = wait_for_process_or_certificate(process, attempt_output_path)
                         if (
                             not certificate_change
                             and profile.fullscreen
@@ -933,7 +944,7 @@ def run(screen: curses.window) -> None:
                                     env=environment,
                                 )
                                 returncode, certificate_change = wait_for_process_or_certificate(
-                                    fallback_process, session_log_start
+                                    fallback_process, attempt_output_path
                                 )
                                 effective_client, effective_renderer, fallback_used = fallback_client, "x11", True
                             else:
@@ -946,10 +957,10 @@ def run(screen: curses.window) -> None:
                             stderr=subprocess.STDOUT,
                             env=environment,
                         )
-                        returncode, certificate_change = wait_for_process_or_certificate(process, session_log_start)
+                        returncode, certificate_change = wait_for_process_or_certificate(process, attempt_output_path)
                     output.flush()
                     certificate_change = certificate_change or certificate_change_fingerprint(
-                        log_output_since(session_log_start)
+                        process_output(attempt_output_path)
                     )
                 elapsed = time.monotonic() - started
                 last_result = f"{effective_client} exited with code {returncode} after {elapsed:.1f}s."
@@ -995,6 +1006,8 @@ def run(screen: curses.window) -> None:
             finally:
                 if askpass_path:
                     Path(askpass_path).unlink(missing_ok=True)
+                if attempt_output_path:
+                    attempt_output_path.unlink(missing_ok=True)
                 curses.reset_prog_mode()
                 curses.curs_set(0)
                 screen.keypad(True)
