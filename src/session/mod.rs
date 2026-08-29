@@ -6,11 +6,13 @@ pub mod supervisor;
 
 use crate::credentials::askpass::AskpassLease;
 use crate::credentials::{CredentialError, CredentialStore, acquire};
+use crate::freerdp::capabilities::AuthOnlySupport;
+use crate::freerdp::deep_test::{AuthOutcome, authenticate};
 use crate::freerdp::discover::discover;
 use crate::freerdp::process::launch;
 use crate::model::{
-    ConnectionFailure, ConnectionPlan, PreparedConnection, Profile, Renderer, RouteHandle,
-    SessionId, SessionResult,
+    ConnectionFailure, ConnectionPlan, PreparedConnection, Profile, Renderer, ResolvedCredentials,
+    RouteHandle, SessionId, SessionResult,
 };
 use crate::planner::plan;
 use crate::preflight::{prepare_for_session, verify_prepared};
@@ -56,6 +58,7 @@ pub enum ConnectError {
     Discover(String),
     Plan(ConnectionFailure),
     Preflight(ConnectionFailure),
+    Credential(CredentialError),
     Io(std::io::Error),
 }
 
@@ -67,6 +70,7 @@ impl std::fmt::Display for ConnectError {
             Self::Preflight(failure) => {
                 write!(formatter, "connection is not reachable: {failure:?}")
             }
+            Self::Credential(error) => write!(formatter, "credential acquisition failed: {error}"),
             Self::Io(error) => error.fmt(formatter),
         }
     }
@@ -200,6 +204,89 @@ pub fn test_profile(profile: &Profile, timeout: Duration) -> Result<(), ConnectE
 fn plan_profile(profile: &Profile) -> Result<ConnectionPlan, ConnectError> {
     let discovered = discover(profile.display.renderer).map_err(ConnectError::Discover)?;
     plan(profile, &discovered.capabilities, discovered.client).map_err(ConnectError::Plan)
+}
+
+/// The result of an auth-only deep-test.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DeepTest {
+    /// The stored credentials authenticated against the host.
+    Authenticated,
+    /// The host rejected the credentials.
+    AuthFailed,
+    /// The host could not be reached to attempt authentication.
+    Unreachable,
+    /// This `FreeRDP` build's auth-only mode is not version-validated.
+    NotSupported,
+    /// Skipped: a deep-test ran too recently for this profile (a courtesy, not
+    /// a lockout guarantee).
+    RateLimited,
+}
+
+/// Minimum spacing between deep-tests of one profile — a courtesy that reduces
+/// the chance of tripping a target account-lockout policy rdp-tui cannot observe.
+const DEEP_TEST_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Verify a profile's stored credentials with `FreeRDP`'s auth-only mode. Never
+/// automatic and always explicit (DEC-deep-test); gated on a version-validated
+/// capability and rate-limited through a persisted per-profile timestamp.
+///
+/// # Errors
+///
+/// Returns [`ConnectError`] when no X11 client is available, credentials cannot
+/// be resolved, or the auth-only attempt cannot be run.
+pub fn deep_test_profile(
+    profile: &Profile,
+    store: &impl CredentialStore,
+    helper: &Path,
+    state_dir: &Path,
+) -> Result<DeepTest, ConnectError> {
+    // Auth-only runs headless, so always use the X11 client.
+    let discovered = discover(Renderer::X11).map_err(ConnectError::Discover)?;
+    if discovered.capabilities.auth_only != AuthOnlySupport::Validated {
+        return Ok(DeepTest::NotSupported);
+    }
+    let stamp = state_dir
+        .join("deep_test")
+        .join(format!("{}.json", profile.id));
+    if recently_deep_tested(&stamp) {
+        return Ok(DeepTest::RateLimited);
+    }
+    let references = ResolvedCredentials {
+        main: profile.credential,
+        gateway: None,
+    };
+    let lease = acquire(store, references).map_err(ConnectError::Credential)?;
+    let askpass = AskpassLease::prepare(&lease, helper.to_path_buf()).map_err(ConnectError::Io)?;
+    let outcome = authenticate(
+        &discovered.client.executable,
+        &profile.endpoint,
+        &profile.identity,
+        profile.security.certificate_policy,
+        &askpass,
+    )
+    .map_err(ConnectError::Io)?;
+    record_deep_test(&stamp);
+    Ok(match outcome {
+        AuthOutcome::Authenticated => DeepTest::Authenticated,
+        AuthOutcome::LogonFailure => DeepTest::AuthFailed,
+        AuthOutcome::Unreachable => DeepTest::Unreachable,
+    })
+}
+
+fn recently_deep_tested(stamp: &Path) -> bool {
+    std::fs::metadata(stamp)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed < DEEP_TEST_INTERVAL)
+}
+
+fn record_deep_test(stamp: &Path) {
+    if let Some(parent) = stamp.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // The file's mtime is the rate-limit clock.
+    let _ = std::fs::write(stamp, b"{}\n");
 }
 
 /// Health of a detached session as seen from its record.

@@ -3,8 +3,7 @@
 use crate::ProfileStore;
 use crate::config::ConfigStore;
 use crate::config::migrate::import_python_profiles;
-use crate::credentials::{forget_encrypted, store_encrypted_password};
-use crate::freerdp::capabilities::AuthOnlySupport;
+use crate::credentials::{SystemCredentialStore, forget_encrypted, store_encrypted_password};
 use crate::freerdp::certificate;
 use crate::freerdp::discover::discover;
 use crate::model::{CertificatePolicy, ConnectionPlan, Profile, ProfileId, Renderer};
@@ -31,7 +30,7 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [command, id] if command == "inspect" => inspect(&store, id),
         [command] if command == "validate" => validate(&store),
         [command, id] if command == "test" => test(&store, id),
-        [command, id] if command == "deep-test" => deep_test(&store, id),
+        [command, id] if command == "deep-test" => deep_test(&store, config_root, id),
         [command, id] if command == "connect" => connect(&store, id),
         [command, sub, id] if command == "credential" && sub == "set" => {
             credential_set(&store, config_root, id)
@@ -435,19 +434,29 @@ fn validate_profile(profile: &Profile) -> Result<(), String> {
         .map_err(|error| format!("{error:?}"))
 }
 
-fn deep_test(store: &ProfileStore, value: &str) -> Result<String, String> {
+fn deep_test(store: &ProfileStore, config_root: &Path, value: &str) -> Result<String, String> {
+    use crate::session::DeepTest;
     let profile = load_profile(store, value)?;
-    let discovered = discover(profile.display.renderer)?;
-    // Deep-test only runs auth-only when it is version-validated (DEC-deep-test);
-    // it is never automatic and never falls back to a silent real auth attempt.
-    let message = match discovered.capabilities.auth_only {
-        AuthOnlySupport::Validated => "auth-only deep-test is available",
-        AuthOnlySupport::NotSupported => "not supported by this FreeRDP build",
-        AuthOnlySupport::Unvalidated => {
-            "unavailable — FreeRDP auth-only behaviour is not validated for this version; use `test` for reachability"
-        }
+    let helper = std::env::current_exe().map_err(|error| error.to_string())?;
+    let credentials = SystemCredentialStore::new(config_root);
+    let outcome = crate::session::deep_test_profile(&profile, &credentials, &helper, &state_dir())
+        .map_err(|error| error.to_string())?;
+    let message = match outcome {
+        DeepTest::Authenticated => "credentials accepted",
+        DeepTest::AuthFailed => "authentication failed — the host rejected the credentials",
+        DeepTest::Unreachable => "could not reach the host to authenticate",
+        DeepTest::NotSupported => "auth-only is not supported by this FreeRDP build",
+        DeepTest::RateLimited => "skipped — deep-tested too recently (try again shortly)",
     };
     Ok(format!("deep-test: {} — {message}\n", profile.name))
+}
+
+fn state_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from(".local/state"))
+        .join("rdp-tui")
 }
 
 const fn usage() -> &'static str {
