@@ -5,7 +5,7 @@ use crate::config::ConfigStore;
 use crate::config::migrate::import_python_profiles;
 use crate::credentials::{forget_encrypted, store_encrypted_password};
 use crate::freerdp::discover::discover;
-use crate::model::{ConnectionPlan, Profile, ProfileId, Renderer};
+use crate::model::{CertificatePolicy, ConnectionPlan, Profile, ProfileId, Renderer};
 use crate::planner::plan;
 use crate::session::{connect_profile, test_profile};
 use secrecy::SecretString;
@@ -36,6 +36,7 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [command, sub, id] if command == "credential" && sub == "clear" => {
             credential_clear(&store, config_root, id)
         }
+        [command, id, policy] if command == "certificate" => certificate_policy(&store, id, policy),
         [command] if command == "config-paths" => Ok(format!(
             "config.toml: {}\nprofiles.toml: {}\n",
             config_root.join("config.toml").display(),
@@ -147,6 +148,27 @@ pub fn set_profile_credential(
     Ok(())
 }
 
+fn certificate_policy(store: &ProfileStore, value: &str, policy: &str) -> Result<String, String> {
+    let policy = parse_certificate_policy(policy)?;
+    let mut profile = load_profile(store, value)?;
+    let name = profile.name.clone();
+    profile.security.certificate_policy = policy;
+    store.upsert(profile).map_err(|error| error.to_string())?;
+    Ok(format!("certificate: {name} now uses {policy:?}\n"))
+}
+
+fn parse_certificate_policy(value: &str) -> Result<CertificatePolicy, String> {
+    match value {
+        "tofu" => Ok(CertificatePolicy::Tofu),
+        "system" => Ok(CertificatePolicy::System),
+        "ignore" => Ok(CertificatePolicy::Ignore),
+        "deny" => Ok(CertificatePolicy::Deny),
+        other => Err(format!(
+            "unknown certificate policy '{other}' (use tofu | system | ignore | deny)"
+        )),
+    }
+}
+
 fn migrate_python(store: &ProfileStore, source: &std::path::Path) -> Result<String, String> {
     let text = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
     let document = import_python_profiles(&text).map_err(|error| error.to_string())?;
@@ -220,7 +242,7 @@ fn validate(store: &ProfileStore) -> Result<String, String> {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | connect <id> | credential set|clear <id> | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | connect <id> | credential set|clear <id> | certificate <id> <tofu|system|ignore|deny> | config-paths | info | doctor | migrate python [profiles.json]]"
 }
 
 #[cfg(test)]
@@ -229,8 +251,8 @@ mod tests {
     use crate::config::ConfigStore;
     use crate::credentials::CredentialStore as _;
     use crate::model::{
-        CredentialBackend, DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile,
-        ProfileId, Route, SecurityConfig,
+        CertificatePolicy, CredentialBackend, DeviceConfig, DisplayConfig, Endpoint,
+        IdentityConfig, Profile, ProfileId, Route, SecurityConfig,
     };
     use crate::secret::file::EncryptedFileStore;
     use secrecy::ExposeSecret as _;
@@ -270,5 +292,21 @@ mod tests {
             .retrieve(reference)
             .unwrap();
         assert_eq!(secret.expose_secret(), "hunter2");
+    }
+
+    #[test]
+    fn setting_a_certificate_policy_updates_the_profile() {
+        let dir = TempDir::new().unwrap();
+        let store = ProfileStore::new(ConfigStore::new(dir.path()));
+        let mut profile = sample_profile();
+        profile.security.certificate_policy = CertificatePolicy::System;
+        let id = profile.id;
+        store.upsert(profile).unwrap();
+
+        super::certificate_policy(&store, &id.to_string(), "tofu").unwrap();
+        let saved = store.get(id).unwrap().unwrap();
+        assert_eq!(saved.security.certificate_policy, CertificatePolicy::Tofu);
+
+        assert!(super::certificate_policy(&store, &id.to_string(), "bogus").is_err());
     }
 }
