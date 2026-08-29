@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
+from .storage import atomic_write, exclusive_lock
+
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rdp-tui" / "profiles.json"
 CLIENT_CANDIDATES = ("xfreerdp3", "xfreerdp")
 SDL_CLIENT_CANDIDATES = ("sdl-freerdp3",)
@@ -120,12 +122,10 @@ def load_profiles(path: Path = CONFIG_PATH) -> list[Profile]:
 
 def save_profiles(profiles: list[Profile], path: Path = CONFIG_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    with temporary.open("w", encoding="utf-8") as file:
-        json.dump([asdict(profile) for profile in profiles], file, indent=2)
-        file.write("\n")
-    os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    os.chmod(path.parent, 0o700)
+    content = json.dumps([asdict(profile) for profile in profiles], indent=2) + "\n"
+    with exclusive_lock(path):
+        atomic_write(path, content)
 
 
 def freerdp_client(renderer: str = "x11") -> str | None:

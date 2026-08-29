@@ -10,6 +10,8 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from .storage import atomic_write, exclusive_lock
+
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rdp-tui"
 KEY_PATH = CONFIG_DIR / ".password-key"
 SECRETS_PATH = CONFIG_DIR / "secrets.json"
@@ -21,11 +23,8 @@ class SecretStoreError(RuntimeError):
 
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8") as file:
-        file.write(content)
-    os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    os.chmod(path.parent, 0o700)
+    atomic_write(path, content)
 
 
 def _key(key_path: Path, create: bool = False) -> bytes | None:
@@ -71,20 +70,22 @@ def _save_file_password(
     profile_id: str, password: str, secrets_path: Path = SECRETS_PATH, key_path: Path = KEY_PATH
 ) -> None:
     try:
-        key = _key(key_path, create=True)
-        assert key is not None
-        data = _load(secrets_path)
-        data[profile_id] = Fernet(key).encrypt(password.encode("utf-8")).decode("ascii")
-        _atomic_write(secrets_path, json.dumps(data, indent=2) + "\n")
+        with exclusive_lock(secrets_path):
+            key = _key(key_path, create=True)
+            assert key is not None
+            data = _load(secrets_path)
+            data[profile_id] = Fernet(key).encrypt(password.encode("utf-8")).decode("ascii")
+            _atomic_write(secrets_path, json.dumps(data, indent=2) + "\n")
     except (OSError, ValueError) as exc:
         raise SecretStoreError(f"Could not save encrypted password: {exc}") from exc
 
 
 def _delete_file_password(profile_id: str, secrets_path: Path = SECRETS_PATH) -> None:
-    data = _load(secrets_path)
-    if profile_id in data:
-        del data[profile_id]
-        _atomic_write(secrets_path, json.dumps(data, indent=2) + "\n")
+    with exclusive_lock(secrets_path):
+        data = _load(secrets_path)
+        if profile_id in data:
+            del data[profile_id]
+            _atomic_write(secrets_path, json.dumps(data, indent=2) + "\n")
 
 
 def _keyring_command(action: str, profile_id: str) -> list[str]:

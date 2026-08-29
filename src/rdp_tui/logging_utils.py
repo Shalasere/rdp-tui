@@ -7,6 +7,8 @@ import logging
 import os
 from pathlib import Path
 
+from .storage import atomic_write, exclusive_lock
+
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "rdp-tui"
 LOG_PATH = STATE_DIR / "rdp-tui.log"
 STATUS_PATH = STATE_DIR / "last-session.json"
@@ -26,12 +28,9 @@ def save_last_session(value: dict[str, object], path: Path = STATUS_PATH) -> Non
     """Atomically retain a non-secret session result for the status screen."""
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
-    temporary = path.with_suffix(".tmp")
-    with temporary.open("w", encoding="utf-8") as file:
-        json.dump(value, file, indent=2, sort_keys=True)
-        file.write("\n")
-    os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    content = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    with exclusive_lock(path):
+        atomic_write(path, content)
 
 
 def configure_logging() -> logging.Logger:

@@ -1,4 +1,5 @@
 import unittest
+from multiprocessing import get_context
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
@@ -30,6 +31,7 @@ from rdp_tui.profiles import (
     validate_profile,
 )
 from rdp_tui.secrets import _delete_file_password, _file_password, _save_file_password, resolved_backend
+from rdp_tui.storage import atomic_write
 
 
 class ProfileTests(unittest.TestCase):
@@ -124,6 +126,14 @@ class ProfileTests(unittest.TestCase):
             self.assertFalse(certificate.exists())
             self.assertEqual(backup.read_text(), "old pin")
             self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+
+    def test_atomic_state_writes_are_private_and_leave_no_fixed_temp_file(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            atomic_write(path, '{"state": 1}\n')
+            self.assertEqual(path.read_text(), '{"state": 1}\n')
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertFalse((Path(directory) / "state.tmp").exists())
 
     def test_formats_selector_columns(self):
         profile = Profile("Office desktop", "rdp.example.test", user="ada", domain="EXAMPLE")
@@ -311,6 +321,29 @@ class ProfileTests(unittest.TestCase):
             self.assertNotIn("correct horse battery staple", secrets_path.read_text())
             _delete_file_password("profile-id", secrets_path)
             self.assertIsNone(_file_password("profile-id", secrets_path, key_path))
+
+    def test_concurrent_encrypted_password_saves_preserve_both_entries(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            secrets_path = root / "secrets.json"
+            key_path = root / ".password-key"
+            context = get_context("fork")
+            first = context.Process(
+                target=_save_file_password,
+                args=("first-profile", "first password", secrets_path, key_path),
+            )
+            second = context.Process(
+                target=_save_file_password,
+                args=("second-profile", "second password", secrets_path, key_path),
+            )
+            first.start()
+            second.start()
+            first.join()
+            second.join()
+            self.assertEqual(first.exitcode, 0)
+            self.assertEqual(second.exitcode, 0)
+            self.assertEqual(_file_password("first-profile", secrets_path, key_path), "first password")
+            self.assertEqual(_file_password("second-profile", secrets_path, key_path), "second password")
 
     def test_import_remmina_and_export_rdp_without_password(self):
         with TemporaryDirectory() as directory:
