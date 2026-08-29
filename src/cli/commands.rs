@@ -2,7 +2,8 @@
 
 use crate::ProfileStore;
 use crate::config::ConfigStore;
-use crate::model::ProfileId;
+use crate::freerdp::discover::discover;
+use crate::model::{ProfileId, Renderer};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -25,8 +26,30 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
             config_root.join("profiles.toml").display()
         )),
         [command] if command == "info" => Ok("rdp-tui Rust frontend: inspection mode\n".into()),
+        [command] if command == "doctor" => Ok(doctor()),
         _ => Err(usage().into()),
     }
+}
+
+fn doctor() -> String {
+    let mut output = String::new();
+    for (label, renderer) in [
+        ("wayland_sdl", Renderer::WaylandSdl),
+        ("x11", Renderer::X11),
+    ] {
+        match discover(renderer) {
+            Ok(found) => writeln!(
+                output,
+                "{label}: {} ({})",
+                found.client.executable.display(),
+                found.client.version
+            )
+            .expect("writing to a String cannot fail"),
+            Err(error) => writeln!(output, "{label}: unavailable ({error})")
+                .expect("writing to a String cannot fail"),
+        }
+    }
+    output
 }
 
 fn list(store: &ProfileStore) -> Result<String, String> {
@@ -60,5 +83,5 @@ fn validate(store: &ProfileStore) -> Result<String, String> {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <profile-id> | validate | config-paths | info]"
+    "usage: rdp-tui [list | show <profile-id> | validate | config-paths | info | doctor]"
 }

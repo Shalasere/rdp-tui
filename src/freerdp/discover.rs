@@ -3,7 +3,7 @@
 use super::capabilities::{AuthOnlySupport, FreeRdpCapabilities};
 use crate::model::{FreeRdpClient, Renderer};
 use semver::Version;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 /// A discovered frontend paired with its conservative capabilities.
@@ -72,9 +72,4 @@ pub fn parse_version(output: &str) -> Option<Version> {
         Version::parse(word.trim_matches(|value: char| !value.is_ascii_digit() && value != '.'))
             .ok()
     })
-}
-
-#[allow(dead_code)]
-fn _is_executable(path: &Path) -> bool {
-    path.is_file()
 }

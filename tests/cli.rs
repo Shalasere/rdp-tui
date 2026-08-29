@@ -23,3 +23,13 @@ fn invalid_commands_are_explained_without_touching_configuration() {
     assert!(error.starts_with("usage:"));
     assert!(!temporary.path().join("profiles.toml").exists());
 }
+
+#[test]
+fn doctor_is_read_only_and_reports_each_renderer() {
+    let temporary = TempDir::new().expect("temporary config directory");
+    let root = temporary.path().to_path_buf();
+    let output = run(&["doctor".into()], &root).expect("doctor");
+    assert!(output.contains("wayland_sdl:"));
+    assert!(output.contains("x11:"));
+    assert!(!root.join("profiles.toml").exists());
+}
