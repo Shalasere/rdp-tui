@@ -2,11 +2,10 @@
 
 use crate::model::{Endpoint, TunnelHandle};
 use crate::runtime::process::{LaunchMode, spawn_child};
-use crate::runtime::registry::{ChildKind, ProcessIdentity, still_matches};
+use crate::runtime::registry::{ChildKind, deregister, register, still_matches};
 use std::ffi::OsString;
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 const STARTUP_ATTEMPTS: usize = 20;
@@ -16,9 +15,6 @@ const STARTUP_DELAY: Duration = Duration::from_millis(25);
 /// TOCTOU window before SSH takes it. See
 /// `docs/architecture/03-process.yaml` (`command_templates.ssh_tunnel.port_allocation`).
 const PORT_ALLOCATION_ATTEMPTS: usize = 5;
-
-static IDENTITIES: OnceLock<Mutex<std::collections::HashMap<(u32, Instant), ProcessIdentity>>> =
-    OnceLock::new();
 
 /// Build the non-interactive SSH command for one retained local forward.
 #[must_use]
@@ -92,8 +88,7 @@ pub fn establish(
 /// Returns an I/O error only when the verified child cannot be terminated or
 /// reaped. A missing or mismatched identity never causes a kill attempt.
 pub fn terminate(handle: &mut TunnelHandle) -> std::io::Result<()> {
-    let Some(identity) = lock_identities()?.remove(&(handle.child.id(), handle.established_at))
-    else {
+    let Some(identity) = deregister(handle.child.id()) else {
         return Ok(());
     };
     if still_matches(identity) {
@@ -168,14 +163,11 @@ fn try_establish_once(
     process.args(command(jump_host, port, target));
     let child =
         spawn_child(&mut process, ChildKind::Tunnel, session, mode).map_err(TunnelError::Spawn)?;
-    let established_at = Instant::now();
-    lock_identities()
-        .map_err(TunnelError::Spawn)?
-        .insert((child.identity.pid, established_at), child.identity);
+    register(child.identity);
     let mut handle = TunnelHandle {
         child: child.child,
         local_endpoint,
-        established_at,
+        established_at: Instant::now(),
     };
     match wait_for_listener(&mut handle) {
         Ok(()) => Ok(handle),
@@ -211,18 +203,6 @@ fn wait_for_listener(handle: &mut TunnelHandle) -> Result<(), TunnelError> {
         std::thread::sleep(STARTUP_DELAY);
     }
     Err(TunnelError::ListenerUnavailable)
-}
-
-fn identities() -> &'static Mutex<std::collections::HashMap<(u32, Instant), ProcessIdentity>> {
-    IDENTITIES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-fn lock_identities()
--> std::io::Result<MutexGuard<'static, std::collections::HashMap<(u32, Instant), ProcessIdentity>>>
-{
-    identities()
-        .lock()
-        .map_err(|_| std::io::Error::other("SSH tunnel identity registry is unavailable"))
 }
 
 #[cfg(test)]
