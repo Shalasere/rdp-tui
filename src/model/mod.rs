@@ -7,6 +7,7 @@ pub mod prepared;
 pub mod profile;
 pub mod route;
 pub mod session;
+pub mod validation;
 
 pub use credential::{CredentialBackend, CredentialPreference, CredentialRef, ResolvedCredentials};
 pub use endpoint::{Endpoint, EndpointParseError, Host};
@@ -20,3 +21,4 @@ pub use profile::{
 };
 pub use route::{PlannedRoute, Route};
 pub use session::{AttemptState, SessionResult, SessionState};
+pub use validation::ProfileValidationIssue;

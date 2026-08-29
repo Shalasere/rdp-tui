@@ -44,12 +44,16 @@ module_graph_amendments:
     tui: [model, session, planner, credentials, preflight, freerdp, ssh, secret, config]
     cli: [model, session, planner, credentials, preflight, freerdp, ssh, secret, config]
   add_files:
+    src/model/id.rs: ProfileId, SessionId, and CredentialKey fixed-width newtypes
+    src/model/validation.rs: pure semantic profile and advanced-override validation
     src/session/mod.rs: shared connect/test orchestration used by TUI and CLI
     src/session/supervisor.rs: detached connect-session owner
     src/freerdp/certificate.rs: certificate pin discovery, fingerprinting, archive, and trust workflow
     src/credentials/lease.rs: nonserializable launch-time secret material
     src/credentials/askpass.rs: sealed-memfd ASKPASS bridge
     src/config/contract.rs: contract schema and cross-reference validator used by tests/CI
+    src/config/error.rs: typed persistence and schema errors
+    src/config/schema.rs: versioned config.toml and profiles.toml parsing
 
 session_supervisor:
   applies_to: connect_only

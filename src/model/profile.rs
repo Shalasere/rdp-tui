@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     pub id: ProfileId,
     pub name: String,
@@ -16,13 +17,14 @@ pub struct Profile {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct IdentityConfig {
     pub username: String,
     pub domain: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Binding shape is specified by 01-types.yaml.
 pub struct DisplayConfig {
     pub renderer: Renderer,
@@ -53,7 +55,7 @@ impl Default for DisplayConfig {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Binding shape is specified by 01-types.yaml.
 pub struct DeviceConfig {
     pub clipboard: bool,
@@ -76,7 +78,7 @@ impl Default for DeviceConfig {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SecurityConfig {
     pub certificate_policy: CertificatePolicy,
     pub admin_session: bool,
@@ -96,7 +98,7 @@ impl Default for SecurityConfig {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AdvancedOverrides {
     pub freerdp_args: Vec<String>,
 }
