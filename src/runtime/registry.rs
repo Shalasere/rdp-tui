@@ -2,18 +2,20 @@
 //! process-local registry of the children rdp-tui currently owns.
 
 use crate::model::SessionId;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChildKind {
     Tunnel,
     FreeRdp,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProcessIdentity {
     pub pid: u32,
     pub start_time_ticks: u64,
