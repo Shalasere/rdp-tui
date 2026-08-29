@@ -10,6 +10,7 @@ use secrecy::{ExposeSecret, SecretString};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 const NONCE_LENGTH: usize = 12;
@@ -74,6 +75,7 @@ impl EncryptedFileStore {
     }
     fn lock(&self) -> Result<File, CredentialError> {
         fs::create_dir_all(&self.root).map_err(unavailable)?;
+        restrict_directory(&self.root)?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -81,11 +83,13 @@ impl EncryptedFileStore {
             .truncate(false)
             .open(self.root.join(".credentials.lock"))
             .map_err(unavailable)?;
+        restrict_file(&file)?;
         file.try_lock_exclusive()
             .map_err(|error| CredentialError::Unavailable(error.to_string()))?;
         Ok(file)
     }
     fn load_or_create_key(&self) -> Result<[u8; 32], CredentialError> {
+        restrict_existing_file(&self.key_path())?;
         match fs::read(self.key_path()) {
             Ok(bytes) if bytes.len() == 32 => bytes
                 .try_into()
@@ -103,6 +107,7 @@ impl EncryptedFileStore {
         }
     }
     fn load_data(&self) -> Result<BTreeMap<String, String>, CredentialError> {
+        restrict_existing_file(&self.data_path())?;
         match fs::read_to_string(self.data_path()) {
             Ok(text) => serde_json::from_str(&text).map_err(|_| {
                 CredentialError::Unavailable("encrypted credential store is corrupt".into())
@@ -169,6 +174,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CredentialError> {
         .parent()
         .ok_or_else(|| CredentialError::Unavailable("credential path has no parent".into()))?;
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(unavailable)?;
+    restrict_file(temp.as_file())?;
     temp.write_all(bytes).map_err(unavailable)?;
     temp.as_file().sync_all().map_err(unavailable)?;
     temp.persist(path)
@@ -178,6 +184,24 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CredentialError> {
         .sync_all()
         .map_err(unavailable)
 }
+
+fn restrict_directory(path: &Path) -> Result<(), CredentialError> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(unavailable)
+}
+
+fn restrict_existing_file(path: &Path) -> Result<(), CredentialError> {
+    match fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(unavailable(error)),
+    }
+}
+
+fn restrict_file(file: &File) -> Result<(), CredentialError> {
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(unavailable)
+}
+
 #[allow(clippy::needless_pass_by_value)] // Accepts owned I/O and crypto errors at call sites.
 fn unavailable(error: impl ToString) -> CredentialError {
     CredentialError::Unavailable(error.to_string())
