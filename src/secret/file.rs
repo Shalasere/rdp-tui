@@ -74,6 +74,8 @@ impl EncryptedFileStore {
         self.save_data(&data)
     }
     fn lock(&self) -> Result<File, CredentialError> {
+        const LOCK_ATTEMPTS: u32 = 50;
+        const LOCK_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
         fs::create_dir_all(&self.root).map_err(unavailable)?;
         restrict_directory(&self.root)?;
         let file = OpenOptions::new()
@@ -84,9 +86,25 @@ impl EncryptedFileStore {
             .open(self.root.join(".credentials.lock"))
             .map_err(unavailable)?;
         restrict_file(&file)?;
-        file.try_lock_exclusive()
-            .map_err(|error| CredentialError::Unavailable(error.to_string()))?;
-        Ok(file)
+        // See config::file::acquire_lock: ride out a transiently-inherited fd
+        // (a spawned child's fork->exec window) with a short bounded wait.
+        for attempt in 1..=LOCK_ATTEMPTS {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(file),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if attempt == LOCK_ATTEMPTS {
+                        return Err(CredentialError::Unavailable(
+                            "the credential store is locked".into(),
+                        ));
+                    }
+                    std::thread::sleep(LOCK_BACKOFF);
+                }
+                Err(error) => return Err(CredentialError::Unavailable(error.to_string())),
+            }
+        }
+        Err(CredentialError::Unavailable(
+            "the credential store is locked".into(),
+        ))
     }
     fn load_or_create_key(&self) -> Result<[u8; 32], CredentialError> {
         restrict_existing_file(&self.key_path())?;

@@ -131,6 +131,8 @@ fn write_document<T: serde::Serialize>(
 }
 
 fn acquire_lock(path: &Path) -> Result<File, StoreError> {
+    const LOCK_ATTEMPTS: u32 = 50;
+    const LOCK_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
     fs::create_dir_all(path.parent().ok_or(StoreError::Corrupt)?)?;
     let lock_path = path.with_file_name(format!(
         ".{}.lock",
@@ -142,11 +144,25 @@ fn acquire_lock(path: &Path) -> Result<File, StoreError> {
         .create(true)
         .truncate(false)
         .open(lock_path)?;
-    match lock.try_lock_exclusive() {
-        Ok(()) => Ok(lock),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Err(StoreError::Locked),
-        Err(error) => Err(StoreError::Io(error)),
+    // Retry briefly before giving up. A lock can be held only transiently -- most
+    // notably an fd inherited into the fork->exec window of a spawned child (e.g.
+    // the detached supervisor), whose O_CLOEXEC fd stays open until exec -- and a
+    // short, bounded wait rides that out instead of failing a legitimate write. A
+    // genuinely contended lock still errors after the budget (INV-5,
+    // DEC-lock-primitive; the contract allows a writer to block or error).
+    for attempt in 1..=LOCK_ATTEMPTS {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(lock),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if attempt == LOCK_ATTEMPTS {
+                    return Err(StoreError::Locked);
+                }
+                std::thread::sleep(LOCK_BACKOFF);
+            }
+            Err(error) => return Err(StoreError::Io(error)),
+        }
     }
+    Err(StoreError::Locked)
 }
 
 fn atomic_write(path: &Path, content: &str) -> Result<(), StoreError> {
