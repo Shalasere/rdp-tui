@@ -431,9 +431,22 @@ fn set_command(
             };
         }
         "route" => profile.route = parse_route_value(new_value)?,
+        "multimon" => profile.display.multimon = parse_bool_value(new_value)?,
+        "span-monitors" => profile.display.span_monitors = parse_bool_value(new_value)?,
+        "smart-sizing" => profile.display.smart_sizing = parse_bool_value(new_value)?,
+        "dynamic-resolution" => profile.display.dynamic_resolution = parse_bool_value(new_value)?,
+        "scale" => profile.display.scale_percent = parse_optional_u16(new_value)?,
+        "color-depth" => profile.display.color_depth = parse_optional_u8(new_value)?,
+        "clipboard" => profile.devices.clipboard = parse_bool_value(new_value)?,
+        "audio" => profile.devices.audio_playback = parse_bool_value(new_value)?,
+        "microphone" => profile.devices.microphone = parse_bool_value(new_value)?,
+        "printers" => profile.devices.printers = parse_bool_value(new_value)?,
         other => {
             return Err(format!(
-                "unknown field '{other}' (name | host | username | domain | fullscreen | renderer | resolution | route)"
+                "unknown field '{other}' (name | host | username | domain | fullscreen | \
+                 renderer | resolution | route | multimon | span-monitors | smart-sizing | \
+                 dynamic-resolution | scale | color-depth | clipboard | audio | microphone | \
+                 printers)"
             ));
         }
     }
@@ -448,6 +461,26 @@ fn parse_bool_value(value: &str) -> Result<bool, String> {
         "false" | "no" | "off" | "0" => Ok(false),
         other => Err(format!("expected a yes/no value, got '{other}'")),
     }
+}
+
+fn parse_optional_u16(value: &str) -> Result<Option<u16>, String> {
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    value
+        .parse::<u16>()
+        .map(Some)
+        .map_err(|_| format!("expected a number or 'none', got '{value}'"))
+}
+
+fn parse_optional_u8(value: &str) -> Result<Option<u8>, String> {
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    value
+        .parse::<u8>()
+        .map(Some)
+        .map_err(|_| format!("expected a number or 'none', got '{value}'"))
 }
 
 fn parse_renderer_value(value: &str) -> Result<Renderer, String> {
@@ -737,12 +770,20 @@ mod tests {
         super::set_command(&store, &id, "host", "10.0.0.9:9833").unwrap();
         super::set_command(&store, &id, "resolution", "1920x1080").unwrap();
         super::set_command(&store, &id, "route", "ssh:jump.example").unwrap();
+        super::set_command(&store, &id, "multimon", "yes").unwrap();
+        super::set_command(&store, &id, "scale", "140").unwrap();
+        super::set_command(&store, &id, "audio", "off").unwrap();
+        // The store rejects an out-of-range scale rather than corrupting the profile.
+        assert!(super::set_command(&store, &id, "scale", "150").is_err());
 
         let saved = store.get(profile.id).unwrap().unwrap();
         assert_eq!(saved.identity.username, "operator");
         assert_eq!(saved.endpoint.to_string(), "10.0.0.9:9833");
         assert_eq!(saved.display.resolution, Some((1920, 1080)));
         assert!(matches!(saved.route, Route::SshTunnel { .. }));
+        assert!(saved.display.multimon);
+        assert_eq!(saved.display.scale_percent, Some(140));
+        assert!(!saved.devices.audio_playback);
 
         assert!(super::set_command(&store, &id, "route", "bogus").is_err());
         assert!(super::set_command(&store, &id, "nonesuch", "x").is_err());
