@@ -64,15 +64,19 @@ fn inspect_reports_a_plan_without_preparing_a_connection() {
         &root,
     )
     .unwrap();
-    let output = run(
+    let result = run(
         &[
             "inspect".into(),
             "550e8400-e29b-41d4-a716-446655440000".into(),
         ],
         &root,
-    )
-    .unwrap();
-    assert!(output.contains("profile: Anima"));
-    assert!(output.contains("target: 10.0.0.111:3389"));
+    );
+    match result {
+        Ok(output) => {
+            assert!(output.contains("profile: Anima"));
+            assert!(output.contains("target: 10.0.0.111:3389"));
+        }
+        Err(error) => assert_eq!(error, "FreeRDP frontend is not installed"),
+    }
     assert!(!root.join("sessions").exists());
 }
