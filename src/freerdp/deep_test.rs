@@ -1,13 +1,19 @@
 //! `FreeRDP` auth-only deep-test: verify credentials without opening a session.
 //!
 //! Uses `FreeRDP`'s documented `/auth-only` mode (validated for `FreeRDP` 3.x
-//! against a real host). The exit status is unreliable — a UPN username can
-//! trigger a Kerberos abort — so the outcome is read from the logged connection
-//! result, not the status code. Credentials arrive through the sealed askpass
-//! bridge; none appear in argv (INV-2, INV-3).
+//! against a real host). Auth-only ignores `FREERDP_ASKPASS` and `/from-stdin`,
+//! so the password is delivered through an inherited memfd read via
+//! `/args-from:fd` — never in argv or an ordinary environment value (INV-3). The
+//! exit status is unreliable (a UPN username can trigger a Kerberos abort), so
+//! the outcome is read from the logged connection result, not the status.
 
-use crate::credentials::askpass::AskpassLease;
-use crate::model::{CertificatePolicy, Endpoint, IdentityConfig};
+use crate::model::{Endpoint, IdentityConfig};
+use rustix::fs::{MemfdFlags, memfd_create};
+use secrecy::{ExposeSecret as _, SecretString};
+use std::fmt::Write as _;
+use std::fs::File;
+use std::io::{Seek as _, Write as _};
+use std::os::fd::AsRawFd as _;
 use std::path::Path;
 use std::process::Command;
 
@@ -19,39 +25,41 @@ pub enum AuthOutcome {
     Unreachable,
 }
 
-/// Run `FreeRDP` auth-only against `target` and classify the logged result.
+/// Run `FreeRDP` auth-only against `target` and classify the logged result. The
+/// certificate is ignored — a deep-test probes credentials, not trust.
 ///
 /// # Errors
 ///
-/// Returns an I/O error when the client cannot be run or its output captured.
+/// Returns an I/O error when the argument descriptor cannot be created or the
+/// client cannot be run.
 pub fn authenticate(
     executable: &Path,
     target: &Endpoint,
     identity: &IdentityConfig,
-    certificate_policy: CertificatePolicy,
-    askpass: &AskpassLease,
+    password: Option<&SecretString>,
 ) -> std::io::Result<AuthOutcome> {
-    let mut command = Command::new(executable);
-    command.arg(format!("/v:{target}"));
+    let mut arguments = format!("/v:{target}\n");
     if !identity.username.is_empty() {
-        command.arg(format!("/u:{}", identity.username));
+        let _ = writeln!(arguments, "/u:{}", identity.username);
     }
-    command.arg(format!("/d:{}", identity.domain));
-    command.arg("/auth-only");
-    match certificate_policy {
-        CertificatePolicy::Tofu => {
-            command.arg("/cert:tofu");
-        }
-        CertificatePolicy::Ignore => {
-            command.arg("/cert:ignore");
-        }
-        CertificatePolicy::Deny => {
-            command.arg("/cert:deny");
-        }
-        CertificatePolicy::System => {}
+    let _ = writeln!(arguments, "/d:{}", identity.domain);
+    if let Some(password) = password {
+        let _ = writeln!(arguments, "/p:{}", password.expose_secret());
     }
-    command.envs(askpass.environment());
-    let output = command.output()?;
+    arguments.push_str("/auth-only\n/cert:ignore\n");
+
+    // /args-from must be the sole argument, so the password (in /p:) lives only
+    // in this inherited memfd, never in the process argument list.
+    let descriptor = memfd_create("rdp-tui-authargs", MemfdFlags::empty())?;
+    let mut file = File::from(descriptor);
+    file.write_all(arguments.as_bytes())?;
+    file.rewind()?;
+    let raw = file.as_raw_fd();
+
+    let output = Command::new(executable)
+        .arg(format!("/args-from:fd:{raw}"))
+        .output()?;
+    drop(file); // hold the memfd open across the spawn, then release it
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),

@@ -437,9 +437,8 @@ fn validate_profile(profile: &Profile) -> Result<(), String> {
 fn deep_test(store: &ProfileStore, config_root: &Path, value: &str) -> Result<String, String> {
     use crate::session::DeepTest;
     let profile = load_profile(store, value)?;
-    let helper = std::env::current_exe().map_err(|error| error.to_string())?;
     let credentials = SystemCredentialStore::new(config_root);
-    let outcome = crate::session::deep_test_profile(&profile, &credentials, &helper, &state_dir())
+    let outcome = crate::session::deep_test_profile(&profile, &credentials, &state_dir())
         .map_err(|error| error.to_string())?;
     let message = match outcome {
         DeepTest::Authenticated => "credentials accepted",

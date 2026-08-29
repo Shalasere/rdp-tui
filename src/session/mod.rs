@@ -237,7 +237,6 @@ const DEEP_TEST_INTERVAL: Duration = Duration::from_secs(30);
 pub fn deep_test_profile(
     profile: &Profile,
     store: &impl CredentialStore,
-    helper: &Path,
     state_dir: &Path,
 ) -> Result<DeepTest, ConnectError> {
     // Auth-only runs headless, so always use the X11 client.
@@ -256,13 +255,11 @@ pub fn deep_test_profile(
         gateway: None,
     };
     let lease = acquire(store, references).map_err(ConnectError::Credential)?;
-    let askpass = AskpassLease::prepare(&lease, helper.to_path_buf()).map_err(ConnectError::Io)?;
     let outcome = authenticate(
         &discovered.client.executable,
         &profile.endpoint,
         &profile.identity,
-        profile.security.certificate_policy,
-        &askpass,
+        lease.main.as_ref(),
     )
     .map_err(ConnectError::Io)?;
     record_deep_test(&stamp);
