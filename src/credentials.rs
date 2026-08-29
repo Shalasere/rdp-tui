@@ -1,5 +1,7 @@
 //! Secret acquisition boundary between persisted credential references and launch-time material.
 
+pub mod askpass;
+
 use crate::model::{CredentialRef, ResolvedCredentials};
 use secrecy::SecretString;
 use std::fmt;

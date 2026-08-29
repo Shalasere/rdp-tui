@@ -345,6 +345,7 @@ dependencies = [
  "fs2",
  "getrandom 0.4.3",
  "regex",
+ "rustix",
  "secrecy",
  "semver",
  "serde",

@@ -34,6 +34,7 @@ fn launch_uses_runtime_identity_ownership() {
         "550e8400-e29b-41d4-a716-446655440000"
             .parse::<SessionId>()
             .unwrap(),
+        None,
     )
     .unwrap();
     assert!(child.terminate_if_owned().unwrap().is_some());

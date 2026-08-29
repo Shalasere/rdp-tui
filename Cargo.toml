@@ -13,6 +13,7 @@ base64 = "0.22.1"
 fs2 = "0.4.3"
 getrandom = "0.4.2"
 regex = "1.13.1"
+rustix = { version = "1.1.4", features = ["fs"] }
 secrecy = "0.10.3"
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }

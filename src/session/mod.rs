@@ -11,7 +11,7 @@ use std::time::Instant;
 /// Returns an I/O error when the process cannot be started or waited for.
 pub fn run(prepared: &PreparedConnection, session: SessionId) -> std::io::Result<SessionResult> {
     let started = Instant::now();
-    let mut child = launch(prepared, session)?;
+    let mut child = launch(prepared, session, None)?;
     let status = child.wait()?;
     Ok(SessionResult {
         duration: started.elapsed(),
