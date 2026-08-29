@@ -1,9 +1,12 @@
-use crate::model::{CertificatePolicy, ConnectionPlan, NetworkProfile, PlannedRoute};
+use crate::model::{CertificatePolicy, NetworkProfile, PlannedRoute, PreparedConnection};
 use std::ffi::OsString;
 use std::path::PathBuf;
 /// Build `FreeRDP` argv only; credentials are deliberately not rendered into argv.
 #[must_use]
-pub fn build_command(plan: &ConnectionPlan) -> (PathBuf, Vec<OsString>, Vec<(OsString, OsString)>) {
+pub fn build_command(
+    prepared: &PreparedConnection,
+) -> (PathBuf, Vec<OsString>, Vec<(OsString, OsString)>) {
+    let plan = &prepared.plan;
     let mut args = vec![format!("/v:{}", plan.target).into()];
     if !plan.identity.username.is_empty() {
         args.push(format!("/u:{}", plan.identity.username).into());
