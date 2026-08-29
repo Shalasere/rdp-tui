@@ -7,7 +7,7 @@ pub fn build_command(
     prepared: &PreparedConnection,
 ) -> (PathBuf, Vec<OsString>, Vec<(OsString, OsString)>) {
     let plan = &prepared.plan;
-    let mut args = vec![format!("/v:{}", plan.target).into()];
+    let mut args = vec![format!("/v:{}", prepared.effective_endpoint).into()];
     if !plan.identity.username.is_empty() {
         args.push(format!("/u:{}", plan.identity.username).into());
     }
