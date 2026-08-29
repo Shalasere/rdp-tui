@@ -7,7 +7,7 @@
 
 use super::terminal::TerminalGuard;
 use crate::config::ConfigStore;
-use crate::credentials::{forget_encrypted, store_encrypted_password};
+use crate::credentials::{SystemCredentialStore, forget_encrypted, store_encrypted_password};
 use crate::model::fields;
 use crate::model::{
     DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile, ProfileId, Route,
@@ -312,6 +312,25 @@ fn toggle(flag: &mut bool) {
     *flag = !*flag;
 }
 
+fn deep_test_message(outcome: crate::session::DeepTest) -> &'static str {
+    use crate::session::DeepTest;
+    match outcome {
+        DeepTest::Authenticated => "credentials accepted",
+        DeepTest::AuthFailed => "authentication failed — the host rejected the credentials",
+        DeepTest::Unreachable => "could not reach the host to authenticate",
+        DeepTest::NotSupported => "auth-only is not supported by this FreeRDP build",
+        DeepTest::RateLimited => "skipped — deep-tested too recently (try again shortly)",
+    }
+}
+
+fn state_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from(".local/state"))
+        .join("rdp-tui")
+}
+
 struct App {
     profiles: Vec<Profile>,
     /// Indices into `profiles` that pass the current filter, in display order.
@@ -424,6 +443,7 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(false),
             KeyCode::Enter => self.connect(),
             KeyCode::Char('t') => self.test(),
+            KeyCode::Char('D') => self.deep_test(),
             KeyCode::Char('p') => self.begin_password(),
             KeyCode::Char('a') => self.begin_add(),
             KeyCode::Char('e') => self.begin_edit(),
@@ -866,12 +886,24 @@ impl App {
         };
     }
 
+    fn deep_test(&mut self) {
+        let Some(profile) = self.current().cloned() else {
+            return;
+        };
+        let store = SystemCredentialStore::new(self.config_root.as_path());
+        self.status = match crate::session::deep_test_profile(&profile, &store, &state_dir()) {
+            Ok(outcome) => format!("{}: {}", profile.name, deep_test_message(outcome)),
+            Err(error) => format!("{}: deep-test failed: {error}", profile.name),
+        };
+    }
+
     fn begin_password(&mut self) {
         let Some(name) = self.current().map(|profile| profile.name.clone()) else {
             return;
         };
         self.mode = Mode::Password(String::new());
-        self.status = format!("Enter password for {name} — Enter to save, Esc to cancel");
+        self.status =
+            format!("Password for {name} — Enter to save, empty Enter to clear, Esc to cancel");
     }
 
     fn commit_password(&mut self) {
@@ -880,18 +912,36 @@ impl App {
             _ => return,
         };
         self.mode = Mode::Browsing;
-        if password.is_empty() {
-            self.status = "Password entry cancelled (empty).".into();
-            return;
-        }
         let Some(index) = self.current_index() else {
             return;
         };
         let name = self.profiles[index].name.clone();
+        if password.is_empty() {
+            // Empty = clear any saved password (parity with `credential clear`).
+            self.status = match self.clear_password(index) {
+                Ok(true) => format!("Cleared the password for {name}"),
+                Ok(false) => format!("{name} had no saved password"),
+                Err(error) => format!("Could not clear password: {error}"),
+            };
+            return;
+        }
         self.status = match self.save_password(index, &password) {
             Ok(()) => format!("Saved a password for {name}"),
             Err(error) => format!("Could not save password: {error}"),
         };
+    }
+
+    fn clear_password(&mut self, index: usize) -> Result<bool, String> {
+        let mut profile = self.profiles[index].clone();
+        let Some(reference) = profile.credential.take() else {
+            return Ok(false);
+        };
+        self.store()
+            .upsert(profile.clone())
+            .map_err(|error| error.to_string())?;
+        self.profiles[index] = profile;
+        forget_encrypted(self.config_root.as_path(), reference);
+        Ok(true)
     }
 
     fn save_password(&mut self, index: usize, password: &str) -> Result<(), String> {
@@ -970,7 +1020,7 @@ impl App {
 
         let (title, body) = match &self.mode {
             Mode::Browsing => (
-                " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · t test · p pass · q quit ".to_string(),
+                " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · t test · D deep-test · p pass · q quit ".to_string(),
                 self.status.clone(),
             ),
             Mode::Password(input) => (
@@ -1200,6 +1250,27 @@ mod tests {
         assert!(matches!(app.mode, Mode::Browsing));
         assert!(app.profiles[0].credential.is_some());
         assert!(store.get(id).unwrap().unwrap().credential.is_some());
+    }
+
+    #[test]
+    fn an_empty_password_clears_a_saved_credential() {
+        let (dir, mut app) = app_on_disk(&["Sample"]);
+        let id = app.profiles[0].id;
+
+        app.begin_password();
+        for character in "hunter2".chars() {
+            app.handle_password(press(KeyCode::Char(character)));
+        }
+        app.handle_password(press(KeyCode::Enter));
+        assert!(app.profiles[0].credential.is_some());
+
+        // Re-open and submit nothing: the saved password is cleared.
+        app.begin_password();
+        app.handle_password(press(KeyCode::Enter));
+        assert!(app.profiles[0].credential.is_none());
+
+        let store = ProfileStore::new(ConfigStore::new(dir.path()));
+        assert!(store.get(id).unwrap().unwrap().credential.is_none());
     }
 
     #[test]
