@@ -48,4 +48,55 @@ impl HistoryEntry {
     pub const fn duration(&self) -> Duration {
         Duration::from_millis(self.duration_ms)
     }
+
+    /// A one-line human summary of this entry for the given profile name at the
+    /// current time (epoch seconds).
+    #[must_use]
+    pub fn summarize(&self, name: &str, now: u64) -> String {
+        let outcome = if self.succeeded() { "ok" } else { "failed" };
+        let exit = self
+            .exit_code
+            .map_or_else(|| "?".to_owned(), |code| code.to_string());
+        format!(
+            "{name} - {outcome} (exit {exit}, ran {}) - {} ago",
+            format_span(self.duration().as_secs()),
+            format_span(now.saturating_sub(self.finished_at))
+        )
+    }
+}
+
+/// Render a duration in seconds as a compact string such as 45s or 3m.
+fn format_span(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h", seconds / 3600)
+    } else {
+        format!("{}d", seconds / 86_400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HistoryEntry;
+    use crate::model::{ProfileId, Renderer};
+
+    #[test]
+    fn summarize_reports_outcome_exit_and_age() {
+        let entry = HistoryEntry {
+            profile_id: ProfileId::generate(),
+            finished_at: 1000,
+            duration_ms: 65_000,
+            exit_code: Some(0),
+            failure: None,
+            renderer: Renderer::X11,
+        };
+        let line = entry.summarize("Anima", 1120);
+        assert!(line.contains("Anima"));
+        assert!(line.contains("ok"));
+        assert!(line.contains("2m ago"));
+        assert!(line.contains("ran 1m"));
+    }
 }

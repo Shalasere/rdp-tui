@@ -38,6 +38,8 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [command, id, confirm] if command == "deep-test" => {
             deep_test(&store, config_root, id, affirmative(confirm))
         }
+        [command] if command == "history" => history(&store, None),
+        [command, id] if command == "history" => history(&store, Some(id)),
         [command, id] if command == "connect" => connect(&store, id),
         [command, sub, id] if command == "credential" && sub == "set" => {
             credential_set(&store, config_root, id)
@@ -550,6 +552,45 @@ fn validate_profile(profile: &Profile) -> Result<(), String> {
         .map_err(|error| format!("{error:?}"))
 }
 
+fn history(store: &ProfileStore, filter: Option<&str>) -> Result<String, String> {
+    let wanted = match filter {
+        Some(value) => Some(
+            value
+                .parse::<ProfileId>()
+                .map_err(|error| error.to_string())?,
+        ),
+        None => None,
+    };
+    let document = ConfigStore::new(state_dir())
+        .load_history()
+        .map_err(|error| error.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let mut output = String::new();
+    let mut shown = 0_usize;
+    for entry in document.entries.iter().rev() {
+        if wanted.is_some_and(|id| entry.profile_id != id) {
+            continue;
+        }
+        let name = store.get(entry.profile_id).ok().flatten().map_or_else(
+            || format!("(removed {})", entry.profile_id),
+            |profile| profile.name,
+        );
+        writeln!(output, "{}", entry.summarize(&name, now))
+            .expect("writing to a String cannot fail");
+        shown += 1;
+        if shown >= 20 {
+            break;
+        }
+    }
+    if output.is_empty() {
+        Ok("no connection history yet\n".to_string())
+    } else {
+        Ok(output)
+    }
+}
+
 fn affirmative(value: &str) -> bool {
     matches!(value, "yes" | "--yes" | "-y" | "y")
 }
@@ -604,7 +645,7 @@ fn state_dir() -> PathBuf {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> [--yes] | connect <id> | add <name> <host> | set <id> <field> <value> | clone <id> | delete <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | export <id> <path> | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> [--yes] | connect <id> | add <name> <host> | set <id> <field> <value> | clone <id> | delete <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | export <id> <path> | history [<id>] | config-paths | info | doctor | migrate python [profiles.json]]"
 }
 
 #[cfg(test)]
