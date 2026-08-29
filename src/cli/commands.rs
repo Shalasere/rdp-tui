@@ -56,6 +56,7 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
             certificate_trust(&store, config_root, id, fingerprint)
         }
         [command, path] if command == "import" => import_command(&store, path),
+        [command, id, path] if command == "export" => export_command(&store, id, path),
         [command] if command == "config-paths" => Ok(format!(
             "config.toml: {}\nprofiles.toml: {}\n",
             config_root.join("config.toml").display(),
@@ -330,6 +331,26 @@ fn import_command(store: &ProfileStore, path: &str) -> Result<String, String> {
     ))
 }
 
+fn export_command(store: &ProfileStore, value: &str, path: &str) -> Result<String, String> {
+    let profile = load_profile(store, value)?;
+    let mut destination = PathBuf::from(path);
+    if destination.extension().and_then(std::ffi::OsStr::to_str) != Some("rdp") {
+        destination.set_extension("rdp");
+    }
+    if let Some(parent) = destination.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&destination, crate::config::import::export_rdp(&profile))
+        .map_err(|error| error.to_string())?;
+    Ok(format!(
+        "exported {} to {} (password excluded)\n",
+        profile.name,
+        destination.display()
+    ))
+}
+
 fn same_except_id(current: &Profile, incoming: &Profile) -> bool {
     let mut incoming = incoming.clone();
     incoming.id = current.id;
@@ -459,7 +480,7 @@ fn state_dir() -> PathBuf {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> | connect <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> | connect <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | export <id> <path> | config-paths | info | doctor | migrate python [profiles.json]]"
 }
 
 #[cfg(test)]

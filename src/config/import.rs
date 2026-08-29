@@ -176,6 +176,40 @@ pub fn import_rdp(text: &str, fallback_name: &str) -> Result<Profile, String> {
     .into_profile()
 }
 
+/// Render a profile as a conventional Microsoft `.rdp` file, never exporting a
+/// password. Mirrors the Python exporter.
+#[must_use]
+pub fn export_rdp(profile: &Profile) -> String {
+    let username = if !profile.identity.domain.is_empty() && !profile.identity.username.is_empty() {
+        format!("{}\\{}", profile.identity.domain, profile.identity.username)
+    } else {
+        profile.identity.username.clone()
+    };
+    let mut lines = vec![
+        format!(
+            "screen mode id:i:{}",
+            u8::from(profile.display.fullscreen) + 1
+        ),
+        format!("full address:s:{}", profile.endpoint),
+        format!("username:s:{username}"),
+        format!("domain:s:{}", profile.identity.domain),
+        format!(
+            "redirectclipboard:i:{}",
+            i32::from(profile.devices.clipboard)
+        ),
+        format!(
+            "audiomode:i:{}",
+            if profile.devices.audio_playback { 0 } else { 2 }
+        ),
+        format!("use multimon:i:{}", i32::from(profile.display.multimon)),
+    ];
+    if let Some((width, height)) = profile.display.resolution {
+        lines.push(format!("desktopwidth:i:{width}"));
+        lines.push(format!("desktopheight:i:{height}"));
+    }
+    format!("{}\r\n", lines.join("\r\n"))
+}
+
 #[allow(clippy::struct_excessive_bools)] // Mirrors the imported profile shape.
 struct Imported {
     name: String,
@@ -343,7 +377,7 @@ fn file_stem(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{import_path, import_rdp, import_remmina};
+    use super::{export_rdp, import_path, import_rdp, import_remmina};
     use tempfile::TempDir;
 
     #[test]
@@ -408,5 +442,17 @@ mod tests {
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].name, "Alpha");
         assert_eq!(profiles[1].name, "Beta");
+    }
+
+    #[test]
+    fn exports_a_profile_to_rdp_without_a_password() {
+        let text = "[remmina]\nname=Office\nprotocol=RDP\nserver=10.0.0.5\nusername=CORP\\alice\nresolution_width=1920\nresolution_height=1080\n";
+        let profile = import_remmina(text, "fallback").unwrap();
+        let rdp = export_rdp(&profile);
+        assert!(rdp.contains("full address:s:10.0.0.5:3389"));
+        assert!(rdp.contains("username:s:CORP\\alice"));
+        assert!(rdp.contains("desktopwidth:i:1920"));
+        assert!(!rdp.to_lowercase().contains("password"));
+        assert!(rdp.ends_with("\r\n"));
     }
 }
