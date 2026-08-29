@@ -34,7 +34,10 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [command, id] if command == "inspect" => inspect(&store, id),
         [command] if command == "validate" => validate(&store),
         [command, id] if command == "test" => test(&store, id),
-        [command, id] if command == "deep-test" => deep_test(&store, config_root, id),
+        [command, id] if command == "deep-test" => deep_test(&store, config_root, id, false),
+        [command, id, confirm] if command == "deep-test" => {
+            deep_test(&store, config_root, id, affirmative(confirm))
+        }
         [command, id] if command == "connect" => connect(&store, id),
         [command, sub, id] if command == "credential" && sub == "set" => {
             credential_set(&store, config_root, id)
@@ -547,20 +550,49 @@ fn validate_profile(profile: &Profile) -> Result<(), String> {
         .map_err(|error| format!("{error:?}"))
 }
 
-fn deep_test(store: &ProfileStore, config_root: &Path, value: &str) -> Result<String, String> {
-    use crate::session::DeepTest;
+fn affirmative(value: &str) -> bool {
+    matches!(value, "yes" | "--yes" | "-y" | "y")
+}
+
+fn deep_test(
+    store: &ProfileStore,
+    config_root: &Path,
+    value: &str,
+    acknowledged: bool,
+) -> Result<String, String> {
+    use crate::session::{DEEP_TEST_WARNING, DeepTest};
     let profile = load_profile(store, value)?;
     let credentials = SystemCredentialStore::new(config_root);
-    let outcome = crate::session::deep_test_profile(&profile, &credentials, &state_dir())
-        .map_err(|error| error.to_string())?;
-    let message = match outcome {
-        DeepTest::Authenticated => "credentials accepted",
-        DeepTest::AuthFailed => "authentication failed — the host rejected the credentials",
-        DeepTest::Unreachable => "could not reach the host to authenticate",
-        DeepTest::NotSupported => "auth-only is not supported by this FreeRDP build",
-        DeepTest::RateLimited => "skipped — deep-tested too recently (try again shortly)",
-    };
-    Ok(format!("deep-test: {} — {message}\n", profile.name))
+    let outcome =
+        crate::session::deep_test_profile(&profile, &credentials, &state_dir(), acknowledged)
+            .map_err(|error| error.to_string())?;
+    Ok(match outcome {
+        DeepTest::NeedsAcknowledgement => format!(
+            "{DEEP_TEST_WARNING}\nRe-run to proceed: rdp-tui deep-test {} --yes\n",
+            profile.id
+        ),
+        DeepTest::Authenticated => format!("deep-test: {} — credentials accepted\n", profile.name),
+        DeepTest::AuthFailed => format!(
+            "deep-test: {} — authentication failed (the host rejected the credentials)\n",
+            profile.name
+        ),
+        DeepTest::Unreachable => {
+            format!(
+                "deep-test: {} — could not reach the host to authenticate\n",
+                profile.name
+            )
+        }
+        DeepTest::NotSupported => format!(
+            "deep-test: {} — auth-only is not supported by this FreeRDP build\n",
+            profile.name
+        ),
+        DeepTest::RateLimited => {
+            format!(
+                "deep-test: {} — skipped, deep-tested too recently\n",
+                profile.name
+            )
+        }
+    })
 }
 
 fn state_dir() -> PathBuf {
@@ -572,7 +604,7 @@ fn state_dir() -> PathBuf {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> | connect <id> | add <name> <host> | set <id> <field> <value> | clone <id> | delete <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | export <id> <path> | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> [--yes] | connect <id> | add <name> <host> | set <id> <field> <value> | clone <id> | delete <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | export <id> <path> | config-paths | info | doctor | migrate python [profiles.json]]"
 }
 
 #[cfg(test)]

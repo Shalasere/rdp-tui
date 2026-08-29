@@ -44,3 +44,20 @@ impl Drop for TerminalGuard {
         self.restore();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TerminalGuard;
+
+    #[test]
+    fn restore_runs_at_most_once() {
+        // The "exactly once" guarantee (INV-12) is the `restored` latch: once set,
+        // restore() and Drop must be no-ops that never touch the terminal again.
+        // (Actual raw-mode restoration needs a live tty and is exercised
+        // end-to-end, not here.)
+        let mut guard = TerminalGuard { restored: true };
+        guard.restore();
+        guard.restore();
+        drop(guard); // Drop must also see the latch and do nothing.
+    }
+}

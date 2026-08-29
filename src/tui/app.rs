@@ -14,7 +14,7 @@ use crate::model::{
     SecurityConfig,
 };
 use crate::profile_store::ProfileStore;
-use crate::session::{connect_profile, test_profile};
+use crate::session::{DEEP_TEST_WARNING, connect_profile, test_profile};
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -59,6 +59,7 @@ pub fn run(config_root: &Path) -> io::Result<()> {
 enum PromptAction {
     Find,
     ConfirmDelete(ProfileId),
+    ConfirmDeepTest(ProfileId),
     Import,
     Export(ProfileId),
 }
@@ -320,6 +321,7 @@ fn deep_test_message(outcome: crate::session::DeepTest) -> &'static str {
         DeepTest::Unreachable => "could not reach the host to authenticate",
         DeepTest::NotSupported => "auth-only is not supported by this FreeRDP build",
         DeepTest::RateLimited => "skipped — deep-tested too recently (try again shortly)",
+        DeepTest::NeedsAcknowledgement => "confirmation required",
     }
 }
 
@@ -518,6 +520,15 @@ impl App {
             }
             PromptAction::ConfirmDelete(id) => {
                 self.perform_delete(id, input.trim().eq_ignore_ascii_case("yes"));
+            }
+            PromptAction::ConfirmDeepTest(id) => {
+                if input.trim().eq_ignore_ascii_case("yes") {
+                    if let Some(profile) = self.profiles.iter().find(|p| p.id == id).cloned() {
+                        self.run_deep_test(&profile, true);
+                    }
+                } else {
+                    self.status = "Deep-test cancelled.".into();
+                }
             }
             PromptAction::Import => self.perform_import(input.trim()),
             PromptAction::Export(id) => self.perform_export(id, input.trim()),
@@ -890,11 +901,25 @@ impl App {
         let Some(profile) = self.current().cloned() else {
             return;
         };
+        self.run_deep_test(&profile, false);
+    }
+
+    fn run_deep_test(&mut self, profile: &Profile, acknowledged: bool) {
         let store = SystemCredentialStore::new(self.config_root.as_path());
-        self.status = match crate::session::deep_test_profile(&profile, &store, &state_dir()) {
-            Ok(outcome) => format!("{}: {}", profile.name, deep_test_message(outcome)),
-            Err(error) => format!("{}: deep-test failed: {error}", profile.name),
-        };
+        match crate::session::deep_test_profile(profile, &store, &state_dir(), acknowledged) {
+            // First deep-test of this profile: confirm the one-time warning.
+            Ok(crate::session::DeepTest::NeedsAcknowledgement) => {
+                self.mode = Mode::Prompt {
+                    label: format!("{} Deep-test {}? type yes", DEEP_TEST_WARNING, profile.name),
+                    input: String::new(),
+                    action: PromptAction::ConfirmDeepTest(profile.id),
+                };
+            }
+            Ok(outcome) => {
+                self.status = format!("{}: {}", profile.name, deep_test_message(outcome));
+            }
+            Err(error) => self.status = format!("{}: deep-test failed: {error}", profile.name),
+        }
     }
 
     fn begin_password(&mut self) {
@@ -1428,6 +1453,21 @@ mod tests {
         fresh.perform_import(path.to_str().unwrap());
         assert_eq!(fresh.profiles.len(), 1);
         assert!(fresh.status.contains("skipped 1"));
+    }
+
+    #[test]
+    fn deep_test_asks_for_confirmation_on_first_use() {
+        // A fresh profile has no deep-test stamp, so `D` must confirm the
+        // one-time warning before anything runs.
+        let mut app = app_with(&["Anima"]);
+        app.handle_browsing(press(KeyCode::Char('D')));
+        assert!(matches!(
+            app.mode,
+            Mode::Prompt {
+                action: PromptAction::ConfirmDeepTest(_),
+                ..
+            }
+        ));
     }
 
     #[test]

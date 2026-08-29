@@ -220,7 +220,17 @@ pub enum DeepTest {
     /// Skipped: a deep-test ran too recently for this profile (a courtesy, not
     /// a lockout guarantee).
     RateLimited,
+    /// The first deep-test of this profile: the caller must show
+    /// [`DEEP_TEST_WARNING`] and re-run with `acknowledged = true` to proceed.
+    NeedsAcknowledgement,
 }
+
+/// Shown once, before the first deep-test of a profile (DEC-deep-test-framing):
+/// a deep-test performs a real authentication, and repeated failures can trip an
+/// account-lockout policy rdp-tui cannot observe.
+pub const DEEP_TEST_WARNING: &str = "A deep-test performs a real authentication against the host. \
+Repeated failures can trip the account's lockout policy, which rdp-tui cannot observe or undo. \
+This confirmation is asked once per profile.";
 
 /// Minimum spacing between deep-tests of one profile — a courtesy that reduces
 /// the chance of tripping a target account-lockout policy rdp-tui cannot observe.
@@ -230,6 +240,11 @@ const DEEP_TEST_INTERVAL: Duration = Duration::from_secs(30);
 /// automatic and always explicit (DEC-deep-test); gated on a version-validated
 /// capability and rate-limited through a persisted per-profile timestamp.
 ///
+/// The first deep-test of a profile returns [`DeepTest::NeedsAcknowledgement`]
+/// unless `acknowledged` is set, so a caller can show [`DEEP_TEST_WARNING`] once.
+/// The per-profile stamp file records that a deep-test has run, so the warning is
+/// never shown again.
+///
 /// # Errors
 ///
 /// Returns [`ConnectError`] when no X11 client is available, credentials cannot
@@ -238,15 +253,21 @@ pub fn deep_test_profile(
     profile: &Profile,
     store: &impl CredentialStore,
     state_dir: &Path,
+    acknowledged: bool,
 ) -> Result<DeepTest, ConnectError> {
+    let stamp = state_dir
+        .join("deep_test")
+        .join(format!("{}.json", profile.id));
+    // The one-time warning gate runs before any discovery or network work, so an
+    // unacknowledged first deep-test spawns nothing.
+    if needs_acknowledgement(&stamp, acknowledged) {
+        return Ok(DeepTest::NeedsAcknowledgement);
+    }
     // Auth-only runs headless, so always use the X11 client.
     let discovered = discover(Renderer::X11).map_err(ConnectError::Discover)?;
     if discovered.capabilities.auth_only != AuthOnlySupport::Validated {
         return Ok(DeepTest::NotSupported);
     }
-    let stamp = state_dir
-        .join("deep_test")
-        .join(format!("{}.json", profile.id));
     if recently_deep_tested(&stamp) {
         return Ok(DeepTest::RateLimited);
     }
@@ -268,6 +289,13 @@ pub fn deep_test_profile(
         AuthOutcome::LogonFailure => DeepTest::AuthFailed,
         AuthOutcome::Unreachable => DeepTest::Unreachable,
     })
+}
+
+/// The one-time-warning gate: the first deep-test of a profile (no stamp yet)
+/// needs acknowledgement; once a stamp exists the profile has been deep-tested
+/// before, so the warning is never repeated.
+fn needs_acknowledgement(stamp: &Path, acknowledged: bool) -> bool {
+    !acknowledged && !stamp.exists()
 }
 
 fn recently_deep_tested(stamp: &Path) -> bool {
@@ -326,4 +354,49 @@ pub fn scan_sessions(dir: &Path) -> Vec<SessionStatus> {
         statuses.push(SessionStatus { record, health });
     }
     statuses
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEEP_TEST_INTERVAL, needs_acknowledgement, recently_deep_tested, record_deep_test,
+    };
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    #[test]
+    fn first_deep_test_of_a_profile_needs_acknowledgement() {
+        let dir = TempDir::new().unwrap();
+        let stamp = dir.path().join("deep_test").join("profile.json");
+        // No stamp yet: an unacknowledged first deep-test must be gated.
+        assert!(needs_acknowledgement(&stamp, false));
+        // Explicit acknowledgement lets the first one through.
+        assert!(!needs_acknowledgement(&stamp, true));
+    }
+
+    #[test]
+    fn once_a_deep_test_has_run_no_further_acknowledgement_is_asked() {
+        let dir = TempDir::new().unwrap();
+        let stamp = dir.path().join("deep_test").join("profile.json");
+        record_deep_test(&stamp);
+        assert!(stamp.exists());
+        // A recorded stamp means the profile has been deep-tested before.
+        assert!(!needs_acknowledgement(&stamp, false));
+    }
+
+    #[test]
+    fn the_rate_limit_is_persisted_so_a_separate_process_would_observe_it() {
+        let dir = TempDir::new().unwrap();
+        let stamp = dir.path().join("deep_test").join("profile.json");
+        record_deep_test(&stamp);
+        // A fresh stamp file (what any process reading the same path would see)
+        // blocks a second run inside the courtesy interval.
+        assert!(recently_deep_tested(&stamp));
+
+        // Age the stamp past the interval; the limit no longer applies.
+        let past = std::time::SystemTime::now() - (DEEP_TEST_INTERVAL + Duration::from_secs(5));
+        let file = std::fs::File::open(&stamp).unwrap();
+        file.set_modified(past).unwrap();
+        assert!(!recently_deep_tested(&stamp));
+    }
 }
