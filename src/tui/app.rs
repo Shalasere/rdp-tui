@@ -1,13 +1,17 @@
 //! Ratatui frontend: a profile list that connects, tests, stores passwords, and
-//! manages profiles (add/edit/clone/delete/find) through the same
-//! `session`/`credentials`/`profile_store` functions the CLI uses (INV-8).
+//! manages profiles (add/edit/clone/delete/find/import/export/status) through the
+//! same `session`/`credentials`/`profile_store` functions the CLI uses (INV-8).
+//! The edit form edits every field the CLI `set` command does, sharing one
+//! parser/formatter implementation in `model::fields` (the tui<->cli edge is
+//! forbidden, so nothing is imported from `cli`).
 
 use super::terminal::TerminalGuard;
 use crate::config::ConfigStore;
 use crate::credentials::{forget_encrypted, store_encrypted_password};
+use crate::model::fields;
 use crate::model::{
-    CertificatePolicy, DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile, ProfileId,
-    Renderer, Route, SecurityConfig,
+    DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile, ProfileId, Route,
+    SecurityConfig,
 };
 use crate::profile_store::ProfileStore;
 use crate::session::{connect_profile, test_profile};
@@ -67,128 +71,245 @@ enum Mode {
         input: String,
         action: PromptAction,
     },
-    Editing(EditForm),
+    Editing(Box<EditForm>),
     /// A read-only details/session overlay; any key returns to browsing.
     Status(String),
 }
 
-/// The seven directly-editable fields of a profile, in display order.
-const FIELD_LABELS: [&str; 7] = [
-    "Name",
-    "Host",
-    "Username",
-    "Domain",
-    "Renderer",
-    "Fullscreen",
-    "Certificate",
+/// Every editable profile field, in the order shown in the form. Matches the set
+/// the CLI `set` command accepts, so the two frontends have parity.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Name,
+    Host,
+    Username,
+    Domain,
+    Route,
+    Renderer,
+    Fullscreen,
+    Resolution,
+    Scale,
+    ColorDepth,
+    DynamicResolution,
+    Multimon,
+    SpanMonitors,
+    SmartSizing,
+    Certificate,
+    Clipboard,
+    Audio,
+    Microphone,
+    Printers,
+}
+
+const FIELDS: [Field; 19] = [
+    Field::Name,
+    Field::Host,
+    Field::Username,
+    Field::Domain,
+    Field::Route,
+    Field::Renderer,
+    Field::Fullscreen,
+    Field::Resolution,
+    Field::Scale,
+    Field::ColorDepth,
+    Field::DynamicResolution,
+    Field::Multimon,
+    Field::SpanMonitors,
+    Field::SmartSizing,
+    Field::Certificate,
+    Field::Clipboard,
+    Field::Audio,
+    Field::Microphone,
+    Field::Printers,
 ];
 
-/// A working copy of a profile being added (`target` is `None`) or edited
-/// (`target` is the existing id). Only the common fields are exposed here;
-/// route, device, and advanced display settings stay in the CLI `set` command.
+impl Field {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Host => "Host",
+            Self::Username => "Username",
+            Self::Domain => "Domain",
+            Self::Route => "Route",
+            Self::Renderer => "Renderer",
+            Self::Fullscreen => "Fullscreen",
+            Self::Resolution => "Resolution",
+            Self::Scale => "Scale",
+            Self::ColorDepth => "Color depth",
+            Self::DynamicResolution => "Dynamic res",
+            Self::Multimon => "Multi-monitor",
+            Self::SpanMonitors => "Span monitors",
+            Self::SmartSizing => "Smart sizing",
+            Self::Certificate => "Certificate",
+            Self::Clipboard => "Clipboard",
+            Self::Audio => "Audio",
+            Self::Microphone => "Microphone",
+            Self::Printers => "Printers",
+        }
+    }
+
+    /// Text fields are typed into; the rest are cycled or toggled in place.
+    const fn is_text(self) -> bool {
+        matches!(
+            self,
+            Self::Name
+                | Self::Host
+                | Self::Username
+                | Self::Domain
+                | Self::Route
+                | Self::Resolution
+        )
+    }
+}
+
+/// A working copy of a profile being added (`target` is `None`) or edited. The
+/// draft holds every field except the host, which is kept as text and parsed
+/// into an `Endpoint` on save.
 #[derive(Clone)]
 struct EditForm {
     target: Option<ProfileId>,
-    name: String,
+    draft: Profile,
     host: String,
-    username: String,
-    domain: String,
-    renderer: Renderer,
-    fullscreen: bool,
-    certificate_policy: CertificatePolicy,
     field: usize,
     /// `Some` while the highlighted text field is being typed into.
     editing_text: Option<String>,
+    /// The last parse error to show under the form.
+    error: Option<String>,
 }
 
 impl EditForm {
     fn blank() -> Self {
-        let display = DisplayConfig::default();
-        let security = SecurityConfig::default();
         Self {
             target: None,
-            name: String::new(),
+            draft: blank_profile(),
             host: String::new(),
-            username: String::new(),
-            domain: String::new(),
-            renderer: display.renderer,
-            fullscreen: display.fullscreen,
-            certificate_policy: security.certificate_policy,
             field: 0,
             editing_text: None,
+            error: None,
         }
     }
 
     fn from_profile(profile: &Profile) -> Self {
         Self {
             target: Some(profile.id),
-            name: profile.name.clone(),
+            draft: profile.clone(),
             host: profile.endpoint.to_string(),
-            username: profile.identity.username.clone(),
-            domain: profile.identity.domain.clone(),
-            renderer: profile.display.renderer,
-            fullscreen: profile.display.fullscreen,
-            certificate_policy: profile.security.certificate_policy,
             field: 0,
             editing_text: None,
+            error: None,
         }
     }
 
-    const fn is_text_field(field: usize) -> bool {
-        field <= 3
-    }
-
     fn move_field(&mut self, forward: bool) {
-        let count = FIELD_LABELS.len();
+        let count = FIELDS.len();
         self.field = if forward {
             (self.field + 1) % count
         } else {
             (self.field + count - 1) % count
         };
+        self.error = None;
     }
 
-    fn text_field(&self, field: usize) -> String {
+    fn display_value(&self, field: Field) -> String {
         match field {
-            0 => self.name.clone(),
-            1 => self.host.clone(),
-            2 => self.username.clone(),
-            3 => self.domain.clone(),
-            _ => String::new(),
+            Field::Name => self.draft.name.clone(),
+            Field::Host => self.host.clone(),
+            Field::Username => self.draft.identity.username.clone(),
+            Field::Domain => self.draft.identity.domain.clone(),
+            Field::Route => self.draft.route.to_token(),
+            Field::Renderer => self.draft.display.renderer.token().to_owned(),
+            Field::Fullscreen => fields::format_bool(self.draft.display.fullscreen).to_owned(),
+            Field::Resolution => fields::format_resolution(self.draft.display.resolution),
+            Field::Scale => fields::format_scale(self.draft.display.scale_percent),
+            Field::ColorDepth => fields::format_color_depth(self.draft.display.color_depth),
+            Field::DynamicResolution => {
+                fields::format_bool(self.draft.display.dynamic_resolution).to_owned()
+            }
+            Field::Multimon => fields::format_bool(self.draft.display.multimon).to_owned(),
+            Field::SpanMonitors => fields::format_bool(self.draft.display.span_monitors).to_owned(),
+            Field::SmartSizing => fields::format_bool(self.draft.display.smart_sizing).to_owned(),
+            Field::Certificate => self.draft.security.certificate_policy.token().to_owned(),
+            Field::Clipboard => fields::format_bool(self.draft.devices.clipboard).to_owned(),
+            Field::Audio => fields::format_bool(self.draft.devices.audio_playback).to_owned(),
+            Field::Microphone => fields::format_bool(self.draft.devices.microphone).to_owned(),
+            Field::Printers => fields::format_bool(self.draft.devices.printers).to_owned(),
         }
     }
 
-    fn set_text_field(&mut self, text: String) {
-        match self.field {
-            0 => self.name = text,
-            1 => self.host = text,
-            2 => self.username = text,
-            3 => self.domain = text,
+    /// The editable text for a text field (what pressing Enter loads).
+    fn text_value(&self, field: Field) -> String {
+        match field {
+            Field::Route => self.draft.route.to_token(),
+            Field::Resolution => fields::format_resolution(self.draft.display.resolution),
+            _ => self.display_value(field),
+        }
+    }
+
+    /// Commit a typed buffer into the draft. On a parse error, keep the buffer
+    /// open and record the message so the user can fix it.
+    fn commit_text(&mut self, field: Field, text: String) {
+        match field {
+            Field::Name => self.draft.name = text,
+            Field::Host => self.host = text,
+            Field::Username => self.draft.identity.username = text,
+            Field::Domain => self.draft.identity.domain = text,
+            Field::Route => match Route::from_token(text.trim()) {
+                Ok(route) => self.draft.route = route,
+                Err(error) => {
+                    self.error = Some(error);
+                    self.editing_text = Some(text);
+                    return;
+                }
+            },
+            Field::Resolution => match fields::parse_resolution(text.trim()) {
+                Ok(resolution) => self.draft.display.resolution = resolution,
+                Err(error) => {
+                    self.error = Some(error);
+                    self.editing_text = Some(text);
+                    return;
+                }
+            },
             _ => {}
         }
+        self.error = None;
+        self.editing_text = None;
     }
 
-    /// Toggle or advance the highlighted non-text field. A no-op on text fields.
-    fn cycle(&mut self) {
-        match self.field {
-            4 => self.renderer = next_renderer(self.renderer),
-            5 => self.fullscreen = !self.fullscreen,
-            6 => self.certificate_policy = next_policy(self.certificate_policy),
-            _ => {}
-        }
-    }
-
-    fn display_value(&self, field: usize) -> String {
+    /// Cycle an enum field or toggle a boolean field. A no-op on text fields.
+    fn cycle(&mut self, field: Field) {
+        let display = &mut self.draft.display;
         match field {
-            0 => self.name.clone(),
-            1 => self.host.clone(),
-            2 => self.username.clone(),
-            3 => self.domain.clone(),
-            4 => renderer_label(self.renderer).to_string(),
-            5 => if self.fullscreen { "yes" } else { "no" }.to_string(),
-            6 => policy_label(self.certificate_policy).to_string(),
-            _ => String::new(),
+            Field::Renderer => display.renderer = display.renderer.cycled(),
+            Field::Scale => display.scale_percent = fields::cycle_scale(display.scale_percent),
+            Field::ColorDepth => {
+                display.color_depth = fields::cycle_color_depth(display.color_depth);
+            }
+            Field::Certificate => {
+                let policy = &mut self.draft.security.certificate_policy;
+                *policy = policy.cycled();
+            }
+            Field::Fullscreen => toggle(&mut display.fullscreen),
+            Field::DynamicResolution => toggle(&mut display.dynamic_resolution),
+            Field::Multimon => toggle(&mut display.multimon),
+            Field::SpanMonitors => toggle(&mut display.span_monitors),
+            Field::SmartSizing => toggle(&mut display.smart_sizing),
+            Field::Clipboard => toggle(&mut self.draft.devices.clipboard),
+            Field::Audio => toggle(&mut self.draft.devices.audio_playback),
+            Field::Microphone => toggle(&mut self.draft.devices.microphone),
+            Field::Printers => toggle(&mut self.draft.devices.printers),
+            // Text fields are edited by typing, never cycled.
+            Field::Name
+            | Field::Host
+            | Field::Username
+            | Field::Domain
+            | Field::Route
+            | Field::Resolution => {}
         }
     }
+}
+
+fn toggle(flag: &mut bool) {
+    *flag = !*flag;
 }
 
 struct App {
@@ -383,6 +504,237 @@ impl App {
         }
     }
 
+    fn handle_editing(&mut self, key: KeyEvent) {
+        // Typing into a text field: characters, Backspace, Enter (commit), Esc (abort).
+        if let Mode::Editing(form) = &mut self.mode
+            && form.editing_text.is_some()
+        {
+            match key.code {
+                KeyCode::Esc => {
+                    form.editing_text = None;
+                    form.error = None;
+                }
+                KeyCode::Enter => {
+                    let field = FIELDS[form.field];
+                    if let Some(text) = form.editing_text.take() {
+                        form.commit_text(field, text);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(text) = &mut form.editing_text {
+                        text.pop();
+                    }
+                }
+                KeyCode::Char(character) => {
+                    if let Some(text) = &mut form.editing_text {
+                        text.push(character);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Browsing;
+                self.status = "Edit cancelled.".into();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Mode::Editing(form) = &mut self.mode {
+                    form.move_field(true);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Mode::Editing(form) = &mut self.mode {
+                    form.move_field(false);
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ' | 'e') => self.activate_field(),
+            KeyCode::Char('a' | 'A') => self.save_form(),
+            _ => {}
+        }
+    }
+
+    /// Enter/Space on a field: begin typing a text field, or cycle/toggle it.
+    fn activate_field(&mut self) {
+        if let Mode::Editing(form) = &mut self.mode {
+            let field = FIELDS[form.field];
+            form.error = None;
+            if field.is_text() {
+                form.editing_text = Some(form.text_value(field));
+            } else {
+                form.cycle(field);
+            }
+        }
+    }
+
+    fn save_form(&mut self) {
+        let form = match &self.mode {
+            Mode::Editing(form) => form.clone(),
+            _ => return,
+        };
+        if form.draft.name.trim().is_empty() {
+            self.set_form_error("A name is required.");
+            return;
+        }
+        let endpoint = match form.host.trim().parse::<Endpoint>() {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                self.set_form_error(&format!("Invalid host: {error}"));
+                return;
+            }
+        };
+        let mut profile = form.draft.clone();
+        profile.name = profile.name.trim().to_string();
+        profile.endpoint = endpoint;
+        let id = profile.id;
+        let name = profile.name.clone();
+        let adding = form.target.is_none();
+        match self.store().upsert(profile) {
+            Ok(()) => {
+                self.mode = Mode::Browsing;
+                self.reload();
+                self.select_id(id);
+                self.status = if adding {
+                    format!("Added {name}")
+                } else {
+                    format!("Saved {name}")
+                };
+            }
+            // The store validates on write (e.g. an impossible multimon+span
+            // combination); surface that under the still-open form.
+            Err(error) => self.set_form_error(&error.to_string()),
+        }
+    }
+
+    fn set_form_error(&mut self, message: &str) {
+        if let Mode::Editing(form) = &mut self.mode {
+            form.error = Some(message.to_owned());
+        }
+    }
+
+    fn move_selection(&mut self, forward: bool) {
+        let count = self.visible.len();
+        if count == 0 {
+            return;
+        }
+        let current = self.selected.selected().unwrap_or(0);
+        let next = if forward {
+            (current + 1) % count
+        } else {
+            (current + count - 1) % count
+        };
+        self.selected.select(Some(next));
+        self.status = self.describe_current();
+    }
+
+    fn current_index(&self) -> Option<usize> {
+        self.selected
+            .selected()
+            .and_then(|position| self.visible.get(position).copied())
+    }
+
+    fn current(&self) -> Option<&Profile> {
+        self.current_index().map(|index| &self.profiles[index])
+    }
+
+    fn describe_current(&self) -> String {
+        match self.current() {
+            Some(profile) => {
+                let password = if profile.credential.is_some() {
+                    "saved"
+                } else {
+                    "none"
+                };
+                format!(
+                    "{} · {} · cert:{} · password:{password}",
+                    profile.name,
+                    profile.endpoint,
+                    profile.security.certificate_policy.token(),
+                )
+            }
+            None if self.profiles.is_empty() => "No profiles yet. Press a to add one.".to_string(),
+            None => format!("No matches for filter: {}", self.filter),
+        }
+    }
+
+    fn begin_add(&mut self) {
+        self.mode = Mode::Editing(Box::new(EditForm::blank()));
+        self.status = "Adding a profile — A to accept, Esc to cancel.".into();
+    }
+
+    fn begin_edit(&mut self) {
+        let Some(profile) = self.current() else {
+            self.status = "No profile to edit.".into();
+            return;
+        };
+        let name = profile.name.clone();
+        self.mode = Mode::Editing(Box::new(EditForm::from_profile(profile)));
+        self.status = format!("Editing {name} — A to accept, Esc to cancel.");
+    }
+
+    fn clone_current(&mut self) {
+        let Some(source) = self.current() else {
+            return;
+        };
+        let mut copy = source.clone();
+        copy.id = ProfileId::generate();
+        copy.name = format!("{} (copy)", copy.name);
+        // A clone starts without the source's secret so deleting either profile
+        // cannot forget a shared credential file.
+        copy.credential = None;
+        let (id, name) = (copy.id, copy.name.clone());
+        match self.store().upsert(copy) {
+            Ok(()) => {
+                self.reload();
+                self.select_id(id);
+                self.status = format!("Cloned to {name}");
+            }
+            Err(error) => self.status = format!("Could not clone: {error}"),
+        }
+    }
+
+    fn begin_delete(&mut self) {
+        let Some(profile) = self.current() else {
+            return;
+        };
+        self.mode = Mode::Prompt {
+            label: format!("Delete {}? type yes to confirm", profile.name),
+            input: String::new(),
+            action: PromptAction::ConfirmDelete(profile.id),
+        };
+    }
+
+    fn perform_delete(&mut self, id: ProfileId, confirmed: bool) {
+        if !confirmed {
+            self.status = "Delete cancelled.".into();
+            return;
+        }
+        let removed = self.profiles.iter().find(|profile| profile.id == id);
+        let (name, credential) = match removed {
+            Some(profile) => (profile.name.clone(), profile.credential),
+            None => (id.to_string(), None),
+        };
+        match self.store().remove(id) {
+            Ok(_) => {
+                if let Some(credential) = credential {
+                    forget_encrypted(self.config_root.as_path(), credential);
+                }
+                self.reload();
+                self.status = format!("Deleted {name}");
+            }
+            Err(error) => self.status = format!("Could not delete: {error}"),
+        }
+    }
+
+    fn begin_find(&mut self) {
+        self.mode = Mode::Prompt {
+            label: "Filter by name, host, user, or domain (blank clears)".into(),
+            input: self.filter.clone(),
+            action: PromptAction::Find,
+        };
+    }
+
     fn begin_import(&mut self) {
         self.mode = Mode::Prompt {
             label: "Import a Remmina/.rdp file or a directory".into(),
@@ -456,21 +808,17 @@ impl App {
         if let Some(profile) = self.current() {
             let _ = writeln!(text, "Profile: {}", profile.name);
             let _ = writeln!(text, "Endpoint: {}", profile.endpoint);
-            let _ = writeln!(text, "Route: {:?}", profile.route);
+            let _ = writeln!(text, "Route: {}", profile.route.to_token());
             let _ = writeln!(
                 text,
                 "Renderer: {}   Fullscreen: {}",
-                renderer_label(profile.display.renderer),
-                if profile.display.fullscreen {
-                    "yes"
-                } else {
-                    "no"
-                }
+                profile.display.renderer.token(),
+                fields::format_bool(profile.display.fullscreen)
             );
             let _ = writeln!(
                 text,
                 "Certificate: {}   Password: {}",
-                policy_label(profile.security.certificate_policy),
+                profile.security.certificate_policy.token(),
                 if profile.credential.is_some() {
                     "saved"
                 } else {
@@ -496,242 +844,6 @@ impl App {
             let _ = writeln!(text, "  none active");
         }
         self.mode = Mode::Status(text);
-    }
-
-    fn handle_editing(&mut self, key: KeyEvent) {
-        // Typing into a text field: characters, Backspace, Enter (commit), Esc (abort).
-        if let Mode::Editing(form) = &mut self.mode
-            && form.editing_text.is_some()
-        {
-            match key.code {
-                KeyCode::Esc => form.editing_text = None,
-                KeyCode::Enter => {
-                    if let Some(text) = form.editing_text.take() {
-                        form.set_text_field(text);
-                    }
-                }
-                KeyCode::Backspace => {
-                    if let Some(text) = &mut form.editing_text {
-                        text.pop();
-                    }
-                }
-                KeyCode::Char(character) => {
-                    if let Some(text) = &mut form.editing_text {
-                        text.push(character);
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::Browsing;
-                self.status = "Edit cancelled.".into();
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Mode::Editing(form) = &mut self.mode {
-                    form.move_field(true);
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Mode::Editing(form) = &mut self.mode {
-                    form.move_field(false);
-                }
-            }
-            KeyCode::Enter => self.activate_field(),
-            KeyCode::Char(' ') => {
-                if let Mode::Editing(form) = &mut self.mode {
-                    form.cycle();
-                }
-            }
-            KeyCode::Char('A') => self.save_form(),
-            _ => {}
-        }
-    }
-
-    /// Enter on a field: begin typing a text field, or cycle a toggle/enum.
-    fn activate_field(&mut self) {
-        if let Mode::Editing(form) = &mut self.mode {
-            if EditForm::is_text_field(form.field) {
-                form.editing_text = Some(form.text_field(form.field));
-            } else {
-                form.cycle();
-            }
-        }
-    }
-
-    fn save_form(&mut self) {
-        let form = match &self.mode {
-            Mode::Editing(form) => form.clone(),
-            _ => return,
-        };
-        if form.name.trim().is_empty() {
-            self.status = "A name is required.".into();
-            return;
-        }
-        let endpoint = match form.host.trim().parse::<Endpoint>() {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                self.status = format!("Invalid host: {error}");
-                return;
-            }
-        };
-        let store = self.store();
-        // Editing preserves the profile's non-form fields (route, devices,
-        // resolution, pinned credential); adding starts from defaults.
-        let mut profile = match form.target {
-            Some(id) => match store.get(id) {
-                Ok(Some(profile)) => profile,
-                _ => blank_profile(),
-            },
-            None => blank_profile(),
-        };
-        profile.name = form.name.trim().to_string();
-        profile.endpoint = endpoint;
-        form.username.clone_into(&mut profile.identity.username);
-        form.domain.clone_into(&mut profile.identity.domain);
-        profile.display.renderer = form.renderer;
-        profile.display.fullscreen = form.fullscreen;
-        profile.security.certificate_policy = form.certificate_policy;
-        let id = profile.id;
-        let name = profile.name.clone();
-        let adding = form.target.is_none();
-        match store.upsert(profile) {
-            Ok(()) => {
-                self.mode = Mode::Browsing;
-                self.reload();
-                self.select_id(id);
-                self.status = if adding {
-                    format!("Added {name}")
-                } else {
-                    format!("Saved {name}")
-                };
-            }
-            Err(error) => self.status = format!("Could not save: {error}"),
-        }
-    }
-
-    fn move_selection(&mut self, forward: bool) {
-        let count = self.visible.len();
-        if count == 0 {
-            return;
-        }
-        let current = self.selected.selected().unwrap_or(0);
-        let next = if forward {
-            (current + 1) % count
-        } else {
-            (current + count - 1) % count
-        };
-        self.selected.select(Some(next));
-        self.status = self.describe_current();
-    }
-
-    fn current_index(&self) -> Option<usize> {
-        self.selected
-            .selected()
-            .and_then(|position| self.visible.get(position).copied())
-    }
-
-    fn current(&self) -> Option<&Profile> {
-        self.current_index().map(|index| &self.profiles[index])
-    }
-
-    fn describe_current(&self) -> String {
-        match self.current() {
-            Some(profile) => {
-                let password = if profile.credential.is_some() {
-                    "saved"
-                } else {
-                    "none"
-                };
-                format!(
-                    "{} · {} · cert:{} · password:{password}",
-                    profile.name,
-                    profile.endpoint,
-                    policy_label(profile.security.certificate_policy),
-                )
-            }
-            None if self.profiles.is_empty() => "No profiles yet. Press a to add one.".to_string(),
-            None => format!("No matches for filter: {}", self.filter),
-        }
-    }
-
-    fn begin_add(&mut self) {
-        self.mode = Mode::Editing(EditForm::blank());
-        self.status = "Adding a profile — A to accept, Esc to cancel.".into();
-    }
-
-    fn begin_edit(&mut self) {
-        let Some(profile) = self.current() else {
-            self.status = "No profile to edit.".into();
-            return;
-        };
-        let name = profile.name.clone();
-        self.mode = Mode::Editing(EditForm::from_profile(profile));
-        self.status = format!("Editing {name} — A to accept, Esc to cancel.");
-    }
-
-    fn clone_current(&mut self) {
-        let Some(source) = self.current() else {
-            return;
-        };
-        let mut copy = source.clone();
-        copy.id = ProfileId::generate();
-        copy.name = format!("{} (copy)", copy.name);
-        // A clone starts without the source's secret so deleting either profile
-        // cannot forget a shared credential file.
-        copy.credential = None;
-        let (id, name) = (copy.id, copy.name.clone());
-        match self.store().upsert(copy) {
-            Ok(()) => {
-                self.reload();
-                self.select_id(id);
-                self.status = format!("Cloned to {name}");
-            }
-            Err(error) => self.status = format!("Could not clone: {error}"),
-        }
-    }
-
-    fn begin_delete(&mut self) {
-        let Some(profile) = self.current() else {
-            return;
-        };
-        self.mode = Mode::Prompt {
-            label: format!("Delete {}? type yes to confirm", profile.name),
-            input: String::new(),
-            action: PromptAction::ConfirmDelete(profile.id),
-        };
-    }
-
-    fn perform_delete(&mut self, id: ProfileId, confirmed: bool) {
-        if !confirmed {
-            self.status = "Delete cancelled.".into();
-            return;
-        }
-        let removed = self.profiles.iter().find(|profile| profile.id == id);
-        let (name, credential) = match removed {
-            Some(profile) => (profile.name.clone(), profile.credential),
-            None => (id.to_string(), None),
-        };
-        match self.store().remove(id) {
-            Ok(_) => {
-                if let Some(credential) = credential {
-                    forget_encrypted(self.config_root.as_path(), credential);
-                }
-                self.reload();
-                self.status = format!("Deleted {name}");
-            }
-            Err(error) => self.status = format!("Could not delete: {error}"),
-        }
-    }
-
-    fn begin_find(&mut self) {
-        self.mode = Mode::Prompt {
-            label: "Filter by name, host, user, or domain (blank clears)".into(),
-            input: self.filter.clone(),
-            action: PromptAction::Find,
-        };
     }
 
     fn connect(&mut self) {
@@ -806,21 +918,16 @@ impl App {
             Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(frame.area());
 
         if let Mode::Editing(form) = &self.mode {
-            let items: Vec<ListItem> = FIELD_LABELS
+            let items: Vec<ListItem> = FIELDS
                 .iter()
                 .enumerate()
-                .map(|(index, label)| {
-                    let shown = if form.field == index && form.editing_text.is_some() {
-                        format!("{label}: {}_", form.editing_text.as_deref().unwrap_or(""))
+                .map(|(index, &field)| {
+                    let value = if index == form.field && form.editing_text.is_some() {
+                        format!("{}_", form.editing_text.as_deref().unwrap_or(""))
                     } else {
-                        format!("{label}: {}", form.display_value(index))
+                        form.display_value(field)
                     };
-                    let item = ListItem::new(Line::from(shown));
-                    if form.field == index {
-                        item.style(Style::new().reversed())
-                    } else {
-                        item
-                    }
+                    ListItem::new(Line::from(format!("{:<14} {value}", field.label())))
                 })
                 .collect();
             let title = if form.target.is_some() {
@@ -828,10 +935,14 @@ impl App {
             } else {
                 " add profile "
             };
-            frame.render_widget(
-                List::new(items).block(Block::bordered().title(title)),
-                areas[0],
-            );
+            let list = List::new(items)
+                .block(Block::bordered().title(title))
+                .highlight_symbol("> ")
+                .highlight_style(Style::new().reversed());
+            // A local ListState keeps the highlighted field scrolled into view.
+            let mut state = ListState::default();
+            state.select(Some(form.field));
+            frame.render_stateful_widget(list, areas[0], &mut state);
         } else if let Mode::Status(text) = &self.mode {
             let text = text.clone();
             frame.render_widget(
@@ -859,24 +970,25 @@ impl App {
 
         let (title, body) = match &self.mode {
             Mode::Browsing => (
-                " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · t test · p pass · q quit ",
+                " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · t test · p pass · q quit ".to_string(),
                 self.status.clone(),
             ),
-            Mode::Status(_) => (" any key to return ", String::new()),
             Mode::Password(input) => (
-                " typing password · Enter save · Esc cancel ",
+                " typing password · Enter save · Esc cancel ".to_string(),
                 format!("Password: {}", "*".repeat(input.chars().count())),
             ),
-            Mode::Prompt { label, input, .. } => {
-                (" Enter confirm · Esc cancel ", format!("{label}: {input}"))
-            }
+            Mode::Prompt { label, input, .. } => (
+                " Enter confirm · Esc cancel ".to_string(),
+                format!("{label}: {input}"),
+            ),
+            Mode::Status(_) => (" any key to return ".to_string(), String::new()),
             Mode::Editing(form) => (
                 if form.editing_text.is_some() {
-                    " typing · Enter set · Esc cancel field "
+                    " typing · Enter set · Esc cancel field ".to_string()
                 } else {
-                    " ↑/↓ field · Enter/Space edit · A accept · Esc cancel "
+                    " ↑/↓ field · Enter/Space edit · A accept · Esc cancel ".to_string()
                 },
-                self.status.clone(),
+                form.error.clone().unwrap_or_else(|| self.status.clone()),
             ),
         };
         let footer = Paragraph::new(body).block(Block::bordered().title(title));
@@ -916,41 +1028,9 @@ fn profile_matches(profile: &Profile, query: &str) -> bool {
         || profile.identity.domain.to_lowercase().contains(query)
 }
 
-const fn renderer_label(renderer: Renderer) -> &'static str {
-    match renderer {
-        Renderer::WaylandSdl => "wayland_sdl",
-        Renderer::X11 => "x11",
-    }
-}
-
-const fn next_renderer(renderer: Renderer) -> Renderer {
-    match renderer {
-        Renderer::WaylandSdl => Renderer::X11,
-        Renderer::X11 => Renderer::WaylandSdl,
-    }
-}
-
-const fn policy_label(policy: CertificatePolicy) -> &'static str {
-    match policy {
-        CertificatePolicy::Tofu => "tofu",
-        CertificatePolicy::System => "system",
-        CertificatePolicy::Ignore => "ignore",
-        CertificatePolicy::Deny => "deny",
-    }
-}
-
-const fn next_policy(policy: CertificatePolicy) -> CertificatePolicy {
-    match policy {
-        CertificatePolicy::Tofu => CertificatePolicy::System,
-        CertificatePolicy::System => CertificatePolicy::Ignore,
-        CertificatePolicy::Ignore => CertificatePolicy::Deny,
-        CertificatePolicy::Deny => CertificatePolicy::Tofu,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{App, EditForm, Mode, PromptAction};
+    use super::{App, EditForm, FIELDS, Field, Mode, PromptAction};
     use crate::config::ConfigStore;
     use crate::model::{
         CertificatePolicy, DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile,
@@ -1065,6 +1145,37 @@ mod tests {
         }
     }
 
+    // Opening a text field loads its current value; clear it, then type anew.
+    fn replace_text(app: &mut App, text: &str) {
+        loop {
+            let empty = match &app.mode {
+                Mode::Editing(form) => form.editing_text.as_deref().is_none_or(str::is_empty),
+                _ => true,
+            };
+            if empty {
+                break;
+            }
+            app.handle_editing(press(KeyCode::Backspace));
+        }
+        type_text(app, text);
+    }
+
+    // Move the form cursor to `field` regardless of where it currently sits
+    // (Up/Down wrap, so counting from zero is not reliable).
+    fn go_to_field(app: &mut App, field: Field) {
+        let target = FIELDS.iter().position(|current| *current == field).unwrap();
+        loop {
+            let current = match &app.mode {
+                Mode::Editing(form) => form.field,
+                _ => panic!("not in the edit form"),
+            };
+            if current == target {
+                break;
+            }
+            app.handle_editing(press(KeyCode::Down));
+        }
+    }
+
     #[test]
     fn typing_and_saving_a_password_pins_a_credential_on_disk_and_in_memory() {
         let dir = TempDir::new().unwrap();
@@ -1097,12 +1208,12 @@ mod tests {
         app.handle_browsing(press(KeyCode::Char('a')));
         assert!(matches!(app.mode, Mode::Editing(_)));
 
-        // Name field.
+        // Name field (index 0).
         app.handle_editing(press(KeyCode::Enter));
         type_text(&mut app, "Workbench");
         app.handle_editing(press(KeyCode::Enter));
-        // Move to Host and type it.
-        app.handle_editing(press(KeyCode::Down));
+        // Host field.
+        go_to_field(&mut app, Field::Host);
         app.handle_editing(press(KeyCode::Enter));
         type_text(&mut app, "10.0.0.9:3390");
         app.handle_editing(press(KeyCode::Enter));
@@ -1118,27 +1229,49 @@ mod tests {
     }
 
     #[test]
-    fn editing_a_profile_cycles_certificate_and_persists() {
+    fn editing_advanced_fields_through_the_form_persists_them() {
         let (dir, mut app) = app_on_disk(&["Sample"]);
         let id = app.profiles[0].id;
         app.handle_browsing(press(KeyCode::Char('e')));
-        // Field 6 is Certificate; move down to it and cycle with Space.
-        for _ in 0..6 {
-            app.handle_editing(press(KeyCode::Down));
-        }
+
+        // Cycle the certificate policy (Tofu -> System).
+        go_to_field(&mut app, Field::Certificate);
         app.handle_editing(press(KeyCode::Char(' ')));
+        // Toggle multi-monitor on.
+        go_to_field(&mut app, Field::Multimon);
+        app.handle_editing(press(KeyCode::Char(' ')));
+        // Set the route by typing (clearing the default "direct" first).
+        go_to_field(&mut app, Field::Route);
+        app.handle_editing(press(KeyCode::Enter));
+        replace_text(&mut app, "ssh:jump.example");
+        app.handle_editing(press(KeyCode::Enter));
         app.handle_editing(press(KeyCode::Char('A')));
 
         let store = ProfileStore::new(ConfigStore::new(dir.path()));
         let saved = store.get(id).unwrap().unwrap();
-        // Default Tofu advances one step to System.
         assert_eq!(saved.security.certificate_policy, CertificatePolicy::System);
+        assert!(saved.display.multimon);
+        assert!(matches!(saved.route, Route::SshTunnel { .. }));
+    }
+
+    #[test]
+    fn an_invalid_host_keeps_the_form_open_with_an_error() {
+        let (_dir, mut app) = app_on_disk(&[]);
+        app.begin_add();
+        app.handle_editing(press(KeyCode::Enter));
+        type_text(&mut app, "Named");
+        app.handle_editing(press(KeyCode::Enter));
+        // Accept without ever setting a host.
+        app.handle_editing(press(KeyCode::Char('A')));
+        assert!(matches!(app.mode, Mode::Editing(_)));
+        if let Mode::Editing(form) = &app.mode {
+            assert!(form.error.is_some());
+        }
     }
 
     #[test]
     fn cloning_duplicates_the_selected_profile_without_its_credential() {
         let (dir, mut app) = app_on_disk(&["Sample"]);
-        // Give the source a saved password so we can prove the clone drops it.
         app.begin_password();
         for character in "hunter2".chars() {
             app.handle_password(press(KeyCode::Char(character)));
@@ -1242,9 +1375,9 @@ mod tests {
         profile.name = "Anima".into();
         profile.identity.username = "operator".into();
         let form = EditForm::from_profile(&profile);
-        assert_eq!(form.name, "Anima");
-        assert_eq!(form.username, "operator");
-        assert_eq!(form.renderer, Renderer::WaylandSdl);
+        assert_eq!(form.draft.name, "Anima");
+        assert_eq!(form.draft.identity.username, "operator");
+        assert_eq!(form.draft.display.renderer, Renderer::WaylandSdl);
         assert!(form.target.is_some());
     }
 }
