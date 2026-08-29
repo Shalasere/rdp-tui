@@ -7,5 +7,6 @@ pub mod freerdp;
 pub mod model;
 pub mod planner;
 pub mod profile_store;
+pub mod secret;
 
 pub use profile_store::ProfileStore;
