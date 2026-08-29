@@ -2,8 +2,7 @@ use rdp_tui::model::{
     ConnectionPlan, DeviceConfig, DisplayConfig, FreeRdpClient, IdentityConfig, PlannedRoute,
     Renderer, ResolvedCredentials, SecurityConfig,
 };
-use rdp_tui::preflight::check_tcp;
-use rdp_tui::preflight::prepare;
+use rdp_tui::preflight::{check_tcp, preflight, prepare};
 use semver::Version;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -54,4 +53,18 @@ fn tcp_check_distinguishes_a_reachable_listener_from_a_closed_port() {
 
     drop(listener);
     assert!(check_tcp(&endpoint, Duration::from_millis(100)).is_err());
+}
+
+#[test]
+fn gateway_preflight_checks_only_the_gateway() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("127.0.0.1:{}", listener.local_addr().unwrap().port())
+        .parse()
+        .unwrap();
+    let prepared = preflight(
+        &plan(PlannedRoute::RdGateway { gateway }),
+        Duration::from_millis(100),
+    )
+    .unwrap();
+    assert_eq!(prepared.effective_endpoint.to_string(), "anima:3389");
 }

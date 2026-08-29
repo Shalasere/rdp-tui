@@ -39,6 +39,30 @@ pub fn check_tcp(
     }
 }
 
+/// Prepare a connection and verify the endpoint reachable from this host.
+///
+/// A gateway route is checked at its gateway endpoint only. Its target may be
+/// intentionally resolvable only from inside the gateway network, so local
+/// target DNS and TCP checks would incorrectly reject a valid profile.
+///
+/// # Errors
+///
+/// Returns preparation failures or the DNS, timeout, and network failures
+/// reported by [`check_tcp`].
+pub fn preflight(
+    plan: &ConnectionPlan,
+    timeout: Duration,
+) -> Result<PreparedConnection, ConnectionFailure> {
+    let prepared = prepare(plan)?;
+    let endpoint = match &plan.route {
+        PlannedRoute::Direct => &prepared.effective_endpoint,
+        PlannedRoute::RdGateway { gateway } => gateway,
+        PlannedRoute::SshTunnel { .. } => unreachable!("prepare rejects unsupported SSH routes"),
+    };
+    check_tcp(endpoint, timeout)?;
+    Ok(prepared)
+}
+
 /// Prepare direct and RD Gateway plans without acquiring hidden resources.
 ///
 /// SSH tunnels are intentionally rejected until their retained-process
