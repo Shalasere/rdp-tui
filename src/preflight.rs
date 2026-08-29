@@ -1,6 +1,7 @@
 //! Explicit conversion from a pure plan into a prepared connection.
 
 use crate::model::{ConnectionFailure, ConnectionPlan, PlannedRoute, PreparedConnection};
+use crate::ssh::tunnel::establish;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -79,5 +80,26 @@ pub fn prepare(plan: &ConnectionPlan) -> Result<PreparedConnection, ConnectionFa
         plan: plan.clone(),
         effective_endpoint: plan.target.clone(),
         route_handle: None,
+    })
+}
+
+/// Prepare a route for one session, retaining an SSH tunnel when required.
+///
+/// # Errors
+///
+/// Returns [`ConnectionFailure::Tunnel`] when the retained SSH forward cannot
+/// be established, otherwise the same errors as [`prepare`].
+pub fn prepare_for_session(
+    plan: &ConnectionPlan,
+    session: crate::model::SessionId,
+) -> Result<PreparedConnection, ConnectionFailure> {
+    let PlannedRoute::SshTunnel { jump_host, target } = &plan.route else {
+        return prepare(plan);
+    };
+    let tunnel = establish(jump_host, target, session).map_err(|_| ConnectionFailure::Tunnel)?;
+    Ok(PreparedConnection {
+        plan: plan.clone(),
+        effective_endpoint: tunnel.local_endpoint.clone(),
+        route_handle: Some(crate::model::RouteHandle::SshTunnel(tunnel)),
     })
 }
