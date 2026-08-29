@@ -19,6 +19,7 @@ use ratatui::style::{Style, Stylize as _};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use secrecy::SecretString;
+use std::fmt::Write as _;
 use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -54,6 +55,8 @@ pub fn run(config_root: &Path) -> io::Result<()> {
 enum PromptAction {
     Find,
     ConfirmDelete(ProfileId),
+    Import,
+    Export(ProfileId),
 }
 
 enum Mode {
@@ -65,6 +68,8 @@ enum Mode {
         action: PromptAction,
     },
     Editing(EditForm),
+    /// A read-only details/session overlay; any key returns to browsing.
+    Status(String),
 }
 
 /// The seven directly-editable fields of a profile, in display order.
@@ -279,6 +284,10 @@ impl App {
                 Mode::Password(_) => self.handle_password(key),
                 Mode::Prompt { .. } => self.handle_prompt(key),
                 Mode::Editing(_) => self.handle_editing(key),
+                Mode::Status(_) => {
+                    self.mode = Mode::Browsing;
+                    self.status = self.describe_current();
+                }
             }
         }
     }
@@ -300,6 +309,9 @@ impl App {
             KeyCode::Char('c') => self.clone_current(),
             KeyCode::Char('d') => self.begin_delete(),
             KeyCode::Char('f' | '/') => self.begin_find(),
+            KeyCode::Char('i') => self.begin_import(),
+            KeyCode::Char('x') => self.begin_export(),
+            KeyCode::Char('s') => self.begin_status(),
             _ => {}
         }
         false
@@ -366,7 +378,124 @@ impl App {
             PromptAction::ConfirmDelete(id) => {
                 self.perform_delete(id, input.trim().eq_ignore_ascii_case("yes"));
             }
+            PromptAction::Import => self.perform_import(input.trim()),
+            PromptAction::Export(id) => self.perform_export(id, input.trim()),
         }
+    }
+
+    fn begin_import(&mut self) {
+        self.mode = Mode::Prompt {
+            label: "Import a Remmina/.rdp file or a directory".into(),
+            input: String::new(),
+            action: PromptAction::Import,
+        };
+    }
+
+    fn perform_import(&mut self, path: &str) {
+        if path.is_empty() {
+            self.status = "Import cancelled.".into();
+            return;
+        }
+        match crate::config::import::import_path(Path::new(path)) {
+            Ok(profiles) => {
+                let store = self.store();
+                let existing = self.profiles.clone();
+                let (mut added, mut skipped) = (0_usize, 0_usize);
+                for profile in profiles {
+                    if existing
+                        .iter()
+                        .any(|current| same_except_id(current, &profile))
+                    {
+                        skipped += 1;
+                    } else if store.upsert(profile).is_ok() {
+                        added += 1;
+                    }
+                }
+                self.reload();
+                self.status = format!("Imported {added}, skipped {skipped} unchanged");
+            }
+            Err(error) => self.status = format!("Import failed: {error}"),
+        }
+    }
+
+    fn begin_export(&mut self) {
+        let Some(profile) = self.current() else {
+            self.status = "No profile to export.".into();
+            return;
+        };
+        self.mode = Mode::Prompt {
+            label: format!("Export {} to .rdp path (password excluded)", profile.name),
+            input: format!("{}.rdp", profile.name.replace(' ', "_")),
+            action: PromptAction::Export(profile.id),
+        };
+    }
+
+    fn perform_export(&mut self, id: ProfileId, path: &str) {
+        if path.is_empty() {
+            self.status = "Export cancelled.".into();
+            return;
+        }
+        let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
+            self.status = "Profile is no longer available.".into();
+            return;
+        };
+        let name = profile.name.clone();
+        let contents = crate::config::import::export_rdp(profile);
+        let mut destination = PathBuf::from(path);
+        if destination.extension().and_then(std::ffi::OsStr::to_str) != Some("rdp") {
+            destination.set_extension("rdp");
+        }
+        self.status = match std::fs::write(&destination, contents) {
+            Ok(()) => format!("Exported {name} to {} (no password)", destination.display()),
+            Err(error) => format!("Export failed: {error}"),
+        };
+    }
+
+    fn begin_status(&mut self) {
+        let mut text = String::new();
+        if let Some(profile) = self.current() {
+            let _ = writeln!(text, "Profile: {}", profile.name);
+            let _ = writeln!(text, "Endpoint: {}", profile.endpoint);
+            let _ = writeln!(text, "Route: {:?}", profile.route);
+            let _ = writeln!(
+                text,
+                "Renderer: {}   Fullscreen: {}",
+                renderer_label(profile.display.renderer),
+                if profile.display.fullscreen {
+                    "yes"
+                } else {
+                    "no"
+                }
+            );
+            let _ = writeln!(
+                text,
+                "Certificate: {}   Password: {}",
+                policy_label(profile.security.certificate_policy),
+                if profile.credential.is_some() {
+                    "saved"
+                } else {
+                    "none"
+                }
+            );
+        } else {
+            let _ = writeln!(text, "No profile selected.");
+        }
+        let _ = writeln!(text, "\nActive sessions:");
+        let mut any = false;
+        if let Some(dir) = crate::session::record::sessions_dir() {
+            for session in crate::session::scan_sessions(&dir) {
+                any = true;
+                let _ = writeln!(
+                    text,
+                    "  {} — {:?} (profile {})",
+                    session.record.session_id, session.health, session.record.profile_id
+                );
+            }
+        }
+        if !any {
+            let _ = writeln!(text, "  none active");
+        }
+        self.mode = Mode::Status(text);
     }
 
     fn handle_editing(&mut self, key: KeyEvent) {
@@ -703,6 +832,12 @@ impl App {
                 List::new(items).block(Block::bordered().title(title)),
                 areas[0],
             );
+        } else if let Mode::Status(text) = &self.mode {
+            let text = text.clone();
+            frame.render_widget(
+                Paragraph::new(text).block(Block::bordered().title(" status ")),
+                areas[0],
+            );
         } else {
             let items: Vec<ListItem> = self
                 .visible
@@ -724,9 +859,10 @@ impl App {
 
         let (title, body) = match &self.mode {
             Mode::Browsing => (
-                " Enter connect · a add · e edit · c clone · d del · f find · t test · p pass · q quit ",
+                " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · t test · p pass · q quit ",
                 self.status.clone(),
             ),
+            Mode::Status(_) => (" any key to return ", String::new()),
             Mode::Password(input) => (
                 " typing password · Enter save · Esc cancel ",
                 format!("Password: {}", "*".repeat(input.chars().count())),
@@ -763,6 +899,14 @@ fn blank_profile() -> Profile {
         security: SecurityConfig::default(),
         credential: None,
     }
+}
+
+/// Two profiles are duplicates if they match on everything but their id — the
+/// same dedup rule the CLI importer uses, so re-importing is idempotent.
+fn same_except_id(current: &Profile, incoming: &Profile) -> bool {
+    let mut incoming = incoming.clone();
+    incoming.id = current.id;
+    current == &incoming
 }
 
 fn profile_matches(profile: &Profile, query: &str) -> bool {
@@ -1049,6 +1193,47 @@ mod tests {
         let screen = rendered(&mut app, 80, 24);
         assert!(screen.contains("Compono"));
         assert!(!screen.contains("Anima"));
+    }
+
+    #[test]
+    fn exporting_writes_an_rdp_file_without_a_password() {
+        let (_dir, mut app) = app_on_disk(&["Anima"]);
+        let out = TempDir::new().unwrap();
+        let path = out.path().join("anima"); // extension is added for us
+        let id = app.profiles[0].id;
+        app.perform_export(id, path.to_str().unwrap());
+
+        let written = std::fs::read_to_string(path.with_extension("rdp")).unwrap();
+        assert!(written.contains("full address:s:10.0.0.5:3389"));
+        assert!(!written.to_lowercase().contains("password"));
+    }
+
+    #[test]
+    fn importing_an_exported_profile_adds_it_then_dedups_on_reimport() {
+        let (_source, mut app) = app_on_disk(&["Anima"]);
+        let out = TempDir::new().unwrap();
+        let path = out.path().join("anima.rdp");
+        let id = app.profiles[0].id;
+        app.perform_export(id, path.to_str().unwrap());
+
+        let (_fresh_dir, mut fresh) = app_on_disk(&[]);
+        fresh.perform_import(path.to_str().unwrap());
+        assert_eq!(fresh.profiles.len(), 1);
+
+        // A second import of the same file changes nothing.
+        fresh.perform_import(path.to_str().unwrap());
+        assert_eq!(fresh.profiles.len(), 1);
+        assert!(fresh.status.contains("skipped 1"));
+    }
+
+    #[test]
+    fn status_overlay_shows_the_selected_profile() {
+        let mut app = app_with(&["Anima"]);
+        app.handle_browsing(press(KeyCode::Char('s')));
+        assert!(matches!(app.mode, Mode::Status(_)));
+        let screen = rendered(&mut app, 80, 24);
+        assert!(screen.contains("Anima"));
+        assert!(screen.contains("Active sessions"));
     }
 
     #[test]
