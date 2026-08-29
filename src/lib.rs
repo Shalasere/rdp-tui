@@ -10,5 +10,6 @@ pub mod preflight;
 pub mod profile_store;
 pub mod runtime;
 pub mod secret;
+pub mod session;
 
 pub use profile_store::ProfileStore;
