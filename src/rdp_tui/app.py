@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import curses
+import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
+import signal
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -56,6 +60,12 @@ ADVANCED_FIELDS = (
     "ssh_tunnel",
 )
 FORM_FIELDS = (*EDITABLE, "advanced", "password_backend", "password", "gateway_password")
+LIST_NICKNAME_WIDTH = 22
+LIST_HOST_WIDTH = 30
+FREERDP_SERVER_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "freerdp" / "server"
+CERTIFICATE_BACKUP_DIR = (
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rdp-tui" / "certificate-backups"
+)
 LOGGER = logging.getLogger("rdp_tui")
 ASKPASS_SCRIPT = """#!/usr/bin/env sh
 case "$*" in
@@ -182,7 +192,7 @@ def edit_advanced(screen: curses.window, value: Profile) -> None:
         "scale": tuple(sorted(SCALE_FACTORS)),
         "color_depth": tuple(sorted(COLOR_DEPTHS)),
         "network_type": tuple(sorted(NETWORK_TYPES)),
-        "certificate_policy": ("default", "tofu", "ignore", "deny"),
+        "certificate_policy": ("tofu", "default", "ignore", "deny"),
         "renderer": tuple(RENDERERS),
     }
     while True:
@@ -226,7 +236,7 @@ def edit_advanced(screen: curses.window, value: Profile) -> None:
         elif key in (ord("a"), ord("A")):
             problems = validate_profile(value)
             advanced_problems = [
-                problem for problem in problems if "Profile name" not in problem and "Host " not in problem
+                problem for problem in problems if "Nickname" not in problem and "Host " not in problem
             ]
             if advanced_problems:
                 error = " · ".join(advanced_problems)
@@ -251,7 +261,7 @@ def edit_profile(screen: curses.window, profile: Profile | None = None) -> Profi
     """Edit one profile in a selectable form instead of a prompt sequence."""
     value = replace(profile) if profile else Profile(name="", host="")
     labels = {
-        "name": "Profile name",
+        "name": "Nickname",
         "host": "Host (or host:port)",
         "user": "User",
         "domain": "Domain",
@@ -501,10 +511,16 @@ def profile_status_lines(profile: Profile | None, last_session: dict[str, object
         except SecretStoreError:
             gateway_state = "storage unavailable"
     renderer = RENDERERS.get(profile.renderer, profile.renderer)
+    certificate = profile.certificate_policy
+    if profile.ignore_certificate:
+        certificate = "ignore (legacy setting)"
+    elif profile.certificate_policy == "default" and profile.renderer == "wayland_sdl":
+        certificate += " — interactive certificate prompts may be hidden by SDL"
     lines = [
-        f"Profile: {profile.name}",
+        f"Nickname: {profile.name}",
         f"Target: {profile.user + '@' if profile.user else ''}{profile.host}",
         f"Client: {client or 'not installed'}  •  Renderer: {renderer}",
+        f"Certificate: {certificate}",
         f"RDP size: {requested_resolution}" + (f"  •  Local scale: {desktop_scale}%" if desktop_scale else ""),
         f"Session: {'console (/admin)' if profile.admin_session else 'new RDP desktop'}  •  Smart sizing: {'on' if profile.smart_sizing else 'off'}",
         f"Password: {password_state}",
@@ -543,6 +559,129 @@ def show_status(screen: curses.window, profile: Profile | None, last_session: di
             return
 
 
+def certificate_change_fingerprint(output: str) -> str | None:
+    """Return a presented SHA-256 fingerprint from a FreeRDP certificate-change error."""
+    lowered = output.casefold()
+    changed = "new host identification" in lowered or "certificate does not match" in lowered
+    if not changed:
+        return None
+    match = re.search(r"fingerprint[^\n]*?\bis\s+([0-9a-f]{2}(?::[0-9a-f]{2}){31})", output, re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
+def freerdp_certificate_path(host: str, server_dir: Path | None = None) -> Path | None:
+    """Resolve the FreeRDP certificate pin used by a conventional host or IPv4 target."""
+    endpoint, port = rdp_endpoint(resolved_host(host))
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", endpoint):
+        return None
+    return (server_dir or FREERDP_SERVER_DIR) / f"{endpoint}_{port}.pem"
+
+
+def certificate_fingerprint(path: Path) -> str | None:
+    """Read a PEM certificate's SHA-256 fingerprint without invoking another process."""
+    try:
+        der = ssl.PEM_cert_to_DER_cert(path.read_text(encoding="ascii"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    digest = hashlib.sha256(der).hexdigest().upper()
+    return ":".join(digest[index : index + 2] for index in range(0, len(digest), 2))
+
+
+def archive_freerdp_certificate(path: Path, backup_dir: Path | None = None) -> Path:
+    """Move a stale FreeRDP pin to an owner-only, recoverable backup directory."""
+    destination_dir = backup_dir or CERTIFICATE_BACKUP_DIR
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(destination_dir, 0o700)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    destination = destination_dir / f"{path.name}.{timestamp}.bak"
+    counter = 1
+    while destination.exists():
+        destination = destination_dir / f"{path.name}.{timestamp}.{counter}.bak"
+        counter += 1
+    path.replace(destination)
+    os.chmod(destination, 0o600)
+    return destination
+
+
+def _fingerprint_lines(label: str, fingerprint: str) -> tuple[str, str]:
+    compact = fingerprint.replace(":", "")
+    return f"{label}: {compact[:32]}", f"{' ' * (len(label) + 2)}{compact[32:]}"
+
+
+def confirm_certificate_replacement(
+    screen: curses.window, profile: Profile, pinned_fingerprint: str, presented_fingerprint: str
+) -> bool:
+    """Ask before replacing a changed RDP certificate pin."""
+    pinned_lines = _fingerprint_lines("Pinned SHA-256", pinned_fingerprint or "unavailable")
+    presented_lines = _fingerprint_lines("Presented SHA-256", presented_fingerprint)
+    lines = (
+        "RDP certificate changed",
+        "",
+        f"Nickname: {profile.name}",
+        f"Host: {profile.host}",
+        *pinned_lines,
+        *presented_lines,
+        "",
+        "Only trust this replacement if the remote PC was reinstalled, reset, or had its RDP certificate renewed.",
+        "The old pin will be archived and this profile will use TOFU.",
+        "",
+        "[T] Trust replacement  [Q/Esc] Cancel",
+    )
+    while True:
+        screen.erase()
+        height, width = screen.getmaxyx()
+        for index, line in enumerate(lines):
+            if index >= height - 1:
+                break
+            screen.addnstr(index, 0, line, width - 1, curses.A_BOLD if index == 0 else 0)
+        screen.refresh()
+        key = screen.getch()
+        if key in (ord("t"), ord("T")):
+            return True
+        if key in (ord("q"), ord("Q"), 27):
+            return False
+
+
+def log_output_since(offset: int, path: Path = LOG_PATH) -> str:
+    """Read only the output appended during the current FreeRDP launch."""
+    try:
+        with path.open("rb") as file:
+            file.seek(offset)
+            return file.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _stop_certificate_wait(process: subprocess.Popen) -> int:
+    """Stop only the FreeRDP child that is waiting on a hidden certificate prompt."""
+    process.send_signal(signal.SIGINT)
+    try:
+        return process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+    try:
+        return process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.wait(timeout=1)
+
+
+def wait_for_process_or_certificate(
+    process: subprocess.Popen, log_offset: int, poll_interval: float = 0.1
+) -> tuple[int, str | None]:
+    """Wait for FreeRDP while interrupting a hidden changed-certificate prompt."""
+    while True:
+        fingerprint = certificate_change_fingerprint(log_output_since(log_offset))
+        returncode = process.poll()
+        if fingerprint:
+            if returncode is None:
+                returncode = _stop_certificate_wait(process)
+            return returncode, fingerprint
+        if returncode is not None:
+            return returncode, None
+        time.sleep(poll_interval)
+
+
 def filtered_profiles(profiles: list[Profile], query: str) -> list[Profile]:
     """Return profiles matching a case-insensitive name, host, or user query."""
     terms = query.casefold().split()
@@ -562,6 +701,14 @@ def profile_position(profiles: list[Profile], selected: Profile) -> int:
     return next(index for index, profile in enumerate(profiles) if profile is selected)
 
 
+def profile_list_row(profile: Profile) -> str:
+    """Format a stable nickname, host, and user row for the selector."""
+    nickname = profile.name[:LIST_NICKNAME_WIDTH]
+    host = profile.host[:LIST_HOST_WIDTH]
+    user = f"{profile.domain}\\{profile.user}" if profile.domain and profile.user else profile.user
+    return f"{nickname:<{LIST_NICKNAME_WIDTH}} {host:<{LIST_HOST_WIDTH}} {user or '—'}"
+
+
 def draw(
     screen: curses.window, profiles: list[Profile], selected: int, message: str, last_result: str, query: str = ""
 ) -> None:
@@ -574,13 +721,17 @@ def draw(
         "[Enter] Connect  [A] Add  [E] Edit  [C] Clone  [D] Delete  [F] Find  [I] Import  [X] Export  [S] Status  [Q] Quit",
         width - 1,
     )
+    if query:
+        screen.addnstr(2, 0, f"Filter: {query}", width - 1)
+    header = f"{'Nickname':<{LIST_NICKNAME_WIDTH}} {'Hostname / address':<{LIST_HOST_WIDTH}} User"
+    screen.addnstr(3, 2, header, max(1, width - 3), curses.A_BOLD | curses.A_UNDERLINE)
     if not profiles:
         screen.addnstr(4, 0, "No matching profiles. Press a to add one or f to clear the filter.", width - 1)
-    elif query:
-        screen.addnstr(3, 0, f"Filter: {query}", width - 1)
     for index, profile in enumerate(profiles):
+        if index + 4 >= height - 1:
+            break
         marker = "> " if index == selected else "  "
-        detail = f"{profile.name:<22} {profile.user + '@' if profile.user else ''}{profile.host}"
+        detail = profile_list_row(profile)
         screen.addnstr(index + 4, 0, marker + detail, width - 1, curses.A_REVERSE if index == selected else 0)
     footer = message or status_text(last_result)
     screen.addnstr(height - 1, 0, footer, width - 1)
@@ -645,7 +796,7 @@ def run(screen: curses.window) -> None:
                 save_profiles(profiles)
                 LOGGER.info("Deleted profile name=%r", name)
         elif key == ord("f"):
-            answer = prompt(screen, "Filter profiles by name, host, user, or domain (blank clears)", "")
+            answer = prompt(screen, "Filter profiles by nickname, host, user, or domain (blank clears)", "")
             if answer is not None:
                 query = answer
                 selected = 0
@@ -719,6 +870,7 @@ def run(screen: curses.window) -> None:
                 continue
             askpass_path = None
             environment = None
+            certificate_change = None
             if password is not None or gateway_password is not None:
                 askpass_path = askpass_helper()
                 environment = os.environ | {
@@ -745,6 +897,7 @@ def run(screen: curses.window) -> None:
                 started = time.monotonic()
                 effective_client, effective_renderer = client, profile.renderer
                 fallback_used = False
+                session_log_start = LOG_PATH.stat().st_size if LOG_PATH.exists() else 0
                 with LOG_PATH.open("a", encoding="utf-8") as output:
                     if profile.renderer == "wayland_sdl":
                         process = subprocess.Popen(
@@ -756,8 +909,12 @@ def run(screen: curses.window) -> None:
                         )
                         LOGGER.info("Started SDL RDP process pid=%d; waiting for mapped Wayland window", process.pid)
                         fullscreened = profile.fullscreen and fullscreen_wayland_sdl_window(process.pid)
-                        returncode = process.wait()
-                        if profile.fullscreen and should_fallback_to_x11(profile.renderer, returncode, fullscreened):
+                        returncode, certificate_change = wait_for_process_or_certificate(process, session_log_start)
+                        if (
+                            not certificate_change
+                            and profile.fullscreen
+                            and should_fallback_to_x11(profile.renderer, returncode, fullscreened)
+                        ):
                             fallback_client = freerdp_client("x11")
                             if fallback_client:
                                 fallback_profile = replace(profile, renderer="x11")
@@ -768,28 +925,32 @@ def run(screen: curses.window) -> None:
                                     fallback_client,
                                     shlex.join(fallback_command),
                                 )
-                                result = subprocess.run(
+                                fallback_process = subprocess.Popen(
                                     fallback_command,
                                     stdin=subprocess.DEVNULL if password is not None else None,
                                     stdout=output,
                                     stderr=subprocess.STDOUT,
                                     env=environment,
-                                    check=False,
                                 )
-                                returncode = result.returncode
+                                returncode, certificate_change = wait_for_process_or_certificate(
+                                    fallback_process, session_log_start
+                                )
                                 effective_client, effective_renderer, fallback_used = fallback_client, "x11", True
                             else:
                                 LOGGER.error("SDL failed before mapping and no stable X11 FreeRDP client is installed")
                     else:
-                        result = subprocess.run(
+                        process = subprocess.Popen(
                             command,
                             stdin=subprocess.DEVNULL if password is not None else None,
                             stdout=output,
                             stderr=subprocess.STDOUT,
                             env=environment,
-                            check=False,
                         )
-                        returncode = result.returncode
+                        returncode, certificate_change = wait_for_process_or_certificate(process, session_log_start)
+                    output.flush()
+                    certificate_change = certificate_change or certificate_change_fingerprint(
+                        log_output_since(session_log_start)
+                    )
                 elapsed = time.monotonic() - started
                 last_result = f"{effective_client} exited with code {returncode} after {elapsed:.1f}s."
                 if fallback_used:
@@ -839,6 +1000,33 @@ def run(screen: curses.window) -> None:
                 screen.keypad(True)
                 screen.erase()
                 screen.refresh()
+            if certificate_change:
+                certificate_path = freerdp_certificate_path(profile.host)
+                pinned_fingerprint = certificate_fingerprint(certificate_path) if certificate_path else None
+                if certificate_path and certificate_path.is_file():
+                    if confirm_certificate_replacement(
+                        screen, profile, pinned_fingerprint or "unavailable", certificate_change
+                    ):
+                        try:
+                            archived = archive_freerdp_certificate(certificate_path)
+                            profile.certificate_policy = "tofu"
+                            save_profiles(profiles)
+                            message = f"Archived old certificate to {archived}; connect again to pin the replacement."
+                            LOGGER.warning(
+                                "User trusted changed RDP certificate profile=%r host=%r old=%s new=%s backup=%s",
+                                profile.name,
+                                profile.host,
+                                pinned_fingerprint or "unavailable",
+                                certificate_change,
+                                archived,
+                            )
+                        except OSError as exc:
+                            message = f"Could not archive the old certificate: {exc}"
+                            LOGGER.exception("Could not archive changed RDP certificate for host=%r", profile.host)
+                    else:
+                        message = "Certificate replacement canceled; no trust settings were changed."
+                elif not certificate_path or not certificate_path.is_file():
+                    message = "Certificate changed, but rdp-tui could not locate the existing FreeRDP certificate pin."
 
 
 def main() -> None:

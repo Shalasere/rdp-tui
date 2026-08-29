@@ -47,7 +47,7 @@ class Profile:
     auto_reconnect: bool = False
     network_type: str = "auto"
     color_depth: int = 0
-    certificate_policy: str = "default"
+    certificate_policy: str = "tofu"
     renderer: str = "wayland_sdl"
     admin_session: bool = False
     gateway_host: str = ""
@@ -202,7 +202,7 @@ def validate_profile(profile: Profile) -> list[str]:
     """Return actionable errors without attempting a network connection."""
     errors: list[str] = []
     if not profile.name.strip():
-        errors.append("Profile name is required")
+        errors.append("Nickname is required")
     host = profile.host.strip()
     if not host:
         errors.append("Host is required")

@@ -30,7 +30,13 @@ install the project with `python -m venv .venv && .venv/bin/pip install -e .`.
 On Arch, FreeRDP 3 provides `xfreerdp3`; older releases and some other
 distributions use `xfreerdp`. rdp-tui detects either, preferring `xfreerdp3`.
 
-Press `a` to add a connection. Use arrow keys (or `j`/`k`) to choose a profile, then `Enter` to connect. The profile editor shows every field at once: select a row, press `Enter` to edit it (or `Space` to toggle an option), then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availability and the result of the last session; press `s` for the selected profile's detailed status screen. Press `q` to quit.
+Press `a` to add a connection. The selector displays separate **Nickname**,
+**Hostname / address**, and **User** columns. Use arrow keys (or `j`/`k`) to
+choose a profile, then `Enter` to connect. The profile editor shows every field
+at once: select a row, press `Enter` to edit it (or `Space` to toggle an option),
+then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availability
+and the result of the last session; press `s` for the selected profile's detailed
+status screen. Press `q` to quit.
 
 Press `i` to import a Remmina profile directory, one `.remmina` file, a `.rdp`
 file, or an rdp-tui JSON profile backup. The import prompt defaults to Remmina's
@@ -38,7 +44,7 @@ standard profile directory when it exists, and unchanged profiles are skipped on
 repeat imports. Imported passwords are deliberately excluded. Press `x` to export
 the selected profile as a standard `.rdp` file, also without its saved password.
 
-Press `c` to clone the selected profile (then adjust it before saving), or `f` to filter profiles by name, host, user, or domain. Leave the filter blank to clear it.
+Press `c` to clone the selected profile (then adjust it before saving), or `f` to filter profiles by nickname, host, user, or domain. Leave the filter blank to clear it.
 
 Leave **Domain** empty for a local account; rdp-tui passes that as an explicit empty domain so FreeRDP does not request one. The **Password storage** row defaults to **Automatic**, like Remmina: it uses a currently running Secret Service keyring when available and otherwise chooses the encrypted file. It does not start a keyring just to check. Select **Saved password** to store or replace a password. The fallback is encrypted in `~/.config/rdp-tui/secrets.json`, with its owner-only key held in `~/.config/rdp-tui/.password-key`; neither is committed or shared.
 
@@ -92,6 +98,20 @@ remain available. If SDL exits with an error before its window maps, rdp-tui ret
 once with the stable X11 frontend and records that recovery in the status and log.
 **Use console session** adds FreeRDP's `/admin` option to request
 the existing server console session instead of a separate RDP desktop.
+
+New profiles use **trust on first use (TOFU)** certificate validation. The first
+certificate is accepted and pinned; subsequent connections are rejected if the
+server presents a different certificate. This avoids an invisible interactive
+certificate prompt in the SDL renderer without weakening changed-certificate
+detection. The status screen shows the active policy and warns when the
+interactive `default` policy is combined with SDL.
+
+When FreeRDP reports that a pinned certificate changed, rdp-tui returns to the
+terminal and shows both SHA-256 fingerprints. Press `T` only after confirming
+the remote PC was reinstalled, reset, or renewed its RDP certificate. rdp-tui
+then archives the old pin under
+`~/.config/rdp-tui/certificate-backups/`, switches that profile to TOFU, and
+asks you to reconnect. No manual FreeRDP `.pem` editing is required.
 
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.
 

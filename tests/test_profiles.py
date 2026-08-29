@@ -1,16 +1,21 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from rdp_tui.app import (
+    archive_freerdp_certificate,
+    certificate_change_fingerprint,
     filtered_profiles,
+    freerdp_certificate_path,
     fullscreen_wayland_sdl_window,
     preflight_profile,
+    profile_list_row,
     profile_status_lines,
     should_fallback_to_x11,
     status_text,
     tcp_rdp_reachable,
+    wait_for_process_or_certificate,
 )
 from rdp_tui.profile_io import export_rdp, import_profiles, merge_profiles
 from rdp_tui.profiles import (
@@ -50,13 +55,63 @@ class ProfileTests(unittest.TestCase):
                 "/f",
                 "+clipboard",
                 "/sound",
+                "/cert:tofu",
             ],
         )
+
+    def test_new_profiles_default_to_tofu(self):
+        profile = Profile("LAN", "10.0.0.41")
+        self.assertEqual(profile.certificate_policy, "tofu")
+        self.assertIn("/cert:tofu", command_for(profile))
 
     def test_empty_domain_is_explicit(self):
         command = command_for(Profile("LAN", "10.0.0.41"))
         self.assertIn("/d:", command)
         self.assertIn("/auth-pkg-list:none,ntlm", command)
+
+    def test_detects_changed_certificate_fingerprint(self):
+        fingerprint = ":".join(f"{value:02x}" for value in range(32))
+        output = (
+            "@    WARNING: NEW HOST IDENTIFICATION!     @\n"
+            f"The fingerprint for the host key sent by the remote host is {fingerprint}\n"
+        )
+        self.assertEqual(certificate_change_fingerprint(output), fingerprint.upper())
+        self.assertIsNone(certificate_change_fingerprint(f"The fingerprint is {fingerprint}"))
+
+    @patch("rdp_tui.app.log_output_since")
+    def test_interrupts_hidden_certificate_prompt(self, log_output):
+        fingerprint = ":".join(f"{value:02x}" for value in range(32))
+        log_output.return_value = (
+            "WARNING: NEW HOST IDENTIFICATION!\n"
+            f"The fingerprint for the host key sent by the remote host is {fingerprint}\n"
+        )
+        process = MagicMock()
+        process.poll.return_value = None
+        process.wait.return_value = 130
+        returncode, detected = wait_for_process_or_certificate(process, 0, poll_interval=0)
+        self.assertEqual(returncode, 130)
+        self.assertEqual(detected, fingerprint.upper())
+        process.send_signal.assert_called_once()
+
+    def test_locates_and_archives_freerdp_certificate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            server = root / "server"
+            server.mkdir()
+            certificate = server / "10.0.0.111_3389.pem"
+            certificate.write_text("old pin")
+            self.assertEqual(freerdp_certificate_path("10.0.0.111", server), certificate)
+            backup = archive_freerdp_certificate(certificate, root / "backups")
+            self.assertFalse(certificate.exists())
+            self.assertEqual(backup.read_text(), "old pin")
+            self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+
+    def test_formats_selector_columns(self):
+        profile = Profile("Office desktop", "rdp.example.test", user="ada", domain="EXAMPLE")
+        row = profile_list_row(profile)
+        self.assertEqual(row[:22].rstrip(), "Office desktop")
+        self.assertEqual(row[23:53].rstrip(), "rdp.example.test")
+        self.assertEqual(row[54:], "EXAMPLE\\ada")
 
     @patch("rdp_tui.profiles.socket.gethostbyname", return_value="10.0.0.41")
     def test_resolves_mdns_to_ipv4(self, _lookup):
@@ -185,8 +240,18 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("sdl-freerdp3", report)
         self.assertIn("1920x1080", report)
         self.assertIn("console (/admin)", report)
+        self.assertIn("Certificate: tofu", report)
         self.assertIn("saved (encrypted file)", report)
         self.assertIn("Last session: completed", report)
+
+    @patch("rdp_tui.app.local_display_settings", return_value=("1920x1080", 100))
+    @patch("rdp_tui.app.password_for", return_value=None)
+    @patch("rdp_tui.app.freerdp_client", return_value="sdl-freerdp3")
+    def test_status_warns_about_interactive_certificate_policy_with_sdl(self, _client, _password, _display):
+        report = "\n".join(
+            profile_status_lines(Profile("LAN", "10.0.0.41", certificate_policy="default", renderer="wayland_sdl"))
+        )
+        self.assertIn("interactive certificate prompts may be hidden by SDL", report)
 
     @patch("rdp_tui.app.subprocess.run")
     def test_fullscreens_mapped_sdl_window_without_client_fullscreen(self, run):
