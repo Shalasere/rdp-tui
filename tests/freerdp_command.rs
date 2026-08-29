@@ -41,3 +41,56 @@ fn command_uses_prepared_endpoint_and_never_credential_references() {
     assert!(args.contains(&"/size:1920x1080".into()));
     assert!(environment.is_empty());
 }
+
+#[test]
+fn command_renders_supported_profile_settings() {
+    let mut plan = ConnectionPlan {
+        target: "anima:3389".parse().unwrap(),
+        route: PlannedRoute::Direct,
+        identity: IdentityConfig {
+            username: "local-user".into(),
+            domain: String::new(),
+        },
+        display: DisplayConfig::default(),
+        devices: DeviceConfig::default(),
+        security: SecurityConfig::default(),
+        credentials: ResolvedCredentials::default(),
+        client: FreeRdpClient {
+            executable: PathBuf::from("xfreerdp3"),
+            renderer: Renderer::X11,
+            version: Version::new(3, 30, 0),
+        },
+    };
+    plan.display.span_monitors = true;
+    plan.display.smart_sizing = true;
+    plan.display.scale_percent = Some(140);
+    plan.display.color_depth = Some(32);
+    plan.devices.microphone = true;
+    plan.devices.shared_folders = vec![PathBuf::from("/srv/shared")];
+    plan.security.admin_session = true;
+
+    let prepared = prepare(&plan).unwrap();
+    let (_, args, _) = build_command(&prepared);
+    let args = args
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>();
+
+    for expected in [
+        "/auth-pkg-list:none,ntlm",
+        "/sound",
+        "/microphone",
+        "/drive:rdp-tui-1,/srv/shared",
+        "/admin",
+        "/span",
+        "/smart-sizing",
+        "/scale:140",
+        "/bpp:32",
+    ] {
+        assert!(
+            args.contains(&expected.into()),
+            "missing {expected}: {args:?}"
+        );
+    }
+    assert!(!args.contains(&"/multimon".into()));
+}
