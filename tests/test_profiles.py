@@ -368,7 +368,7 @@ class ProfileTests(unittest.TestCase):
     @patch("rdp_tui.app.tcp_rdp_reachable", return_value=(False, "connection refused"))
     @patch("rdp_tui.app.freerdp_client", return_value="xfreerdp3")
     def test_preflight_blocks_unreachable_target(self, _client, _network):
-        issues = preflight_profile(Profile("LAN", "10.0.0.41"))
+        issues = preflight_profile(Profile("LAN", "10.0.0.41", renderer="x11"))
         self.assertEqual(issues, ["RDP network check failed: connection refused"])
 
     @patch("rdp_tui.secrets.keyring_available", return_value=False)
