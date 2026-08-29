@@ -266,9 +266,72 @@ mod tests {
         SecurityConfig,
     };
     use crate::profile_store::ProfileStore;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    fn app_with(names: &[&str]) -> App {
+        let profiles = names
+            .iter()
+            .map(|name| {
+                let mut profile = sample_profile();
+                profile.name = (*name).to_string();
+                profile
+            })
+            .collect();
+        App::new(
+            profiles,
+            PathBuf::from("/usr/bin/rdp-tui"),
+            PathBuf::from("/tmp/rdp-tui-config"),
+        )
+    }
+
+    fn rendered(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    #[test]
+    fn renders_profiles_and_help_at_80x24() {
+        let mut app = app_with(&["Anima", "Compono"]);
+        let screen = rendered(&mut app, 80, 24);
+        assert!(screen.contains("Anima"));
+        assert!(screen.contains("Compono"));
+        assert!(screen.contains("connect"));
+    }
+
+    #[test]
+    fn renders_import_hint_with_no_profiles() {
+        let mut app = app_with(&[]);
+        assert!(rendered(&mut app, 80, 24).contains("migrate python"));
+    }
+
+    #[test]
+    fn renders_many_and_unicode_names_without_panicking() {
+        let mut app = app_with(&["Straße-Über-Café", "b", "c", "d", "e", "f", "g", "h"]);
+        assert!(rendered(&mut app, 40, 10).contains("Stra"));
+    }
+
+    #[test]
+    fn password_mode_masks_the_typed_input() {
+        let mut app = app_with(&["Anima"]);
+        app.begin_password();
+        for character in "secret".chars() {
+            app.handle_password(press(KeyCode::Char(character)));
+        }
+        let screen = rendered(&mut app, 80, 24);
+        assert!(screen.contains("******"));
+        assert!(!screen.contains("secret"));
+    }
 
     fn sample_profile() -> Profile {
         Profile {
