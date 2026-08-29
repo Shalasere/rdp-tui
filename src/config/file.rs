@@ -1,8 +1,10 @@
 //! Locked, durable persistence for schema-versioned configuration documents.
 
 use super::{
-    ConfigDocument, ProfilesDocument, StoreError, parse_config_document, parse_profiles_document,
+    ConfigDocument, HistoryDocument, ProfilesDocument, StoreError, parse_config_document,
+    parse_history_document, parse_profiles_document,
 };
+use crate::model::HistoryEntry;
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -91,6 +93,44 @@ impl ConfigStore {
         update(&mut document)?;
         write_document(&path, &document, parse_profiles_document)
     }
+
+    /// Location of the connection-history document.
+    #[must_use]
+    pub fn history_path(&self) -> PathBuf {
+        self.root.join("history.toml")
+    }
+
+    /// Load the connection history; a missing file is an empty history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the document cannot be read or validated.
+    pub fn load_history(&self) -> Result<HistoryDocument, StoreError> {
+        load_document(
+            &self.history_path(),
+            HistoryDocument::default(),
+            parse_history_document,
+        )
+    }
+
+    /// Append one entry, keeping only the most recent cap, as a single locked
+    /// read-modify-write transaction (INV-5).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for lock contention or filesystem failure.
+    pub fn record_history(&self, entry: HistoryEntry, cap: usize) -> Result<(), StoreError> {
+        let path = self.history_path();
+        let _lock = acquire_lock(&path)?;
+        let mut document =
+            load_document(&path, HistoryDocument::default(), parse_history_document)?;
+        document.entries.push(entry);
+        let len = document.entries.len();
+        if cap > 0 && len > cap {
+            document.entries.drain(0..len - cap);
+        }
+        write_document(&path, &document, parse_history_document)
+    }
 }
 
 fn load_document<T>(
@@ -175,4 +215,35 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), StoreError> {
         .map_err(|error| StoreError::Io(error.error))?;
     File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConfigStore;
+    use crate::model::{HistoryEntry, ProfileId, Renderer};
+    use tempfile::TempDir;
+
+    fn entry(finished_at: u64) -> HistoryEntry {
+        HistoryEntry {
+            profile_id: ProfileId::generate(),
+            finished_at,
+            duration_ms: 1000,
+            exit_code: Some(0),
+            failure: None,
+            renderer: Renderer::X11,
+        }
+    }
+
+    #[test]
+    fn history_round_trips_and_keeps_only_the_most_recent() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path());
+        for finished_at in 0..5 {
+            store.record_history(entry(finished_at), 3).unwrap();
+        }
+        let loaded = store.load_history().unwrap();
+        assert_eq!(loaded.entries.len(), 3);
+        assert_eq!(loaded.entries[0].finished_at, 2);
+        assert_eq!(loaded.entries[2].finished_at, 4);
+    }
 }

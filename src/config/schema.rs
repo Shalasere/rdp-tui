@@ -1,5 +1,5 @@
 use super::StoreError;
-use crate::model::{CertificatePolicy, Profile, ProfileId, Renderer};
+use crate::model::{CertificatePolicy, HistoryEntry, Profile, ProfileId, Renderer};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -43,6 +43,36 @@ impl Default for ProfilesDocument {
             profiles: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryDocument {
+    pub version: u32,
+    #[serde(default)]
+    pub entries: Vec<HistoryEntry>,
+}
+
+impl Default for HistoryDocument {
+    fn default() -> Self {
+        Self {
+            version: CONFIG_SCHEMA_VERSION,
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// Parse and validate `history.toml` without filesystem access.
+///
+/// # Errors
+///
+/// Returns [`StoreError::Schema`] for malformed TOML, unknown fields, or an
+/// unsupported schema version.
+pub fn parse_history_document(text: &str) -> Result<HistoryDocument, StoreError> {
+    let document = toml::from_str::<HistoryDocument>(text)
+        .map_err(|error| toml_error("history.toml", &error))?;
+    validate_version("history.toml", document.version)?;
+    Ok(document)
 }
 
 /// Parse and semantically validate `config.toml` without filesystem access.
