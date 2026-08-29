@@ -4,7 +4,7 @@
 use super::terminal::TerminalGuard;
 use crate::config::ConfigStore;
 use crate::credentials::{forget_encrypted, store_encrypted_password};
-use crate::model::Profile;
+use crate::model::{CertificatePolicy, Profile};
 use crate::profile_store::ProfileStore;
 use crate::session::{connect_profile, test_profile};
 use ratatui::Terminal;
@@ -62,20 +62,19 @@ struct App {
 impl App {
     fn new(profiles: Vec<Profile>, executable: PathBuf, config_root: PathBuf) -> Self {
         let mut selected = ListState::default();
-        let status = if profiles.is_empty() {
-            "No profiles yet. Import with: rdp-tui migrate python".to_string()
-        } else {
+        if !profiles.is_empty() {
             selected.select(Some(0));
-            "Ready.".to_string()
-        };
-        Self {
+        }
+        let mut app = Self {
             profiles,
             selected,
-            status,
+            status: String::new(),
             executable,
             config_root,
             mode: Mode::Browsing,
-        }
+        };
+        app.status = app.describe_current();
+        app
     }
 
     fn event_loop<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
@@ -110,6 +109,7 @@ impl App {
             KeyCode::Enter | KeyCode::Char('c') => self.connect(),
             KeyCode::Char('t') => self.test(),
             KeyCode::Char('p') => self.begin_password(),
+            KeyCode::Char('C') => self.cycle_certificate(),
             _ => {}
         }
         false
@@ -148,12 +148,50 @@ impl App {
             (current + count - 1) % count
         };
         self.selected.select(Some(next));
+        self.status = self.describe_current();
     }
 
     fn current(&self) -> Option<&Profile> {
         self.selected
             .selected()
             .and_then(|index| self.profiles.get(index))
+    }
+
+    fn describe_current(&self) -> String {
+        match self.current() {
+            Some(profile) => {
+                let password = if profile.credential.is_some() {
+                    "saved"
+                } else {
+                    "none"
+                };
+                format!(
+                    "{} · {} · cert:{} · password:{password}",
+                    profile.name,
+                    profile.endpoint,
+                    policy_label(profile.security.certificate_policy),
+                )
+            }
+            None => "No profiles yet. Import with: rdp-tui migrate python".to_string(),
+        }
+    }
+
+    fn cycle_certificate(&mut self) {
+        let Some(index) = self.selected.selected() else {
+            return;
+        };
+        let next = next_policy(self.profiles[index].security.certificate_policy);
+        self.profiles[index].security.certificate_policy = next;
+        let profile = self.profiles[index].clone();
+        self.status =
+            match ProfileStore::new(ConfigStore::new(self.config_root.as_path())).upsert(profile) {
+                Ok(()) => format!(
+                    "{} certificate policy → {}",
+                    self.profiles[index].name,
+                    policy_label(next)
+                ),
+                Err(error) => format!("Could not save certificate policy: {error}"),
+            };
     }
 
     fn connect(&mut self) {
@@ -244,7 +282,7 @@ impl App {
 
         let (title, body) = match &self.mode {
             Mode::Browsing => (
-                " ↑/↓ move · Enter/c connect · t test · p password · q quit ",
+                " ↑/↓ · Enter/c connect · t test · p password · C cert · q quit ",
                 self.status.clone(),
             ),
             Mode::Password(input) => (
@@ -257,13 +295,31 @@ impl App {
     }
 }
 
+const fn policy_label(policy: CertificatePolicy) -> &'static str {
+    match policy {
+        CertificatePolicy::Tofu => "tofu",
+        CertificatePolicy::System => "system",
+        CertificatePolicy::Ignore => "ignore",
+        CertificatePolicy::Deny => "deny",
+    }
+}
+
+const fn next_policy(policy: CertificatePolicy) -> CertificatePolicy {
+    match policy {
+        CertificatePolicy::Tofu => CertificatePolicy::System,
+        CertificatePolicy::System => CertificatePolicy::Ignore,
+        CertificatePolicy::Ignore => CertificatePolicy::Deny,
+        CertificatePolicy::Deny => CertificatePolicy::Tofu,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{App, Mode};
     use crate::config::ConfigStore;
     use crate::model::{
-        DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile, ProfileId, Route,
-        SecurityConfig,
+        CertificatePolicy, DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile,
+        ProfileId, Route, SecurityConfig,
     };
     use crate::profile_store::ProfileStore;
     use ratatui::Terminal;
@@ -375,5 +431,30 @@ mod tests {
         assert!(matches!(app.mode, Mode::Browsing));
         assert!(app.profiles[0].credential.is_some());
         assert!(store.get(id).unwrap().unwrap().credential.is_some());
+    }
+
+    #[test]
+    fn cycling_certificate_policy_advances_and_persists() {
+        let dir = TempDir::new().unwrap();
+        let config_root = dir.path().to_path_buf();
+        let store = ProfileStore::new(ConfigStore::new(config_root.as_path()));
+        let mut profile = sample_profile();
+        profile.security.certificate_policy = CertificatePolicy::System;
+        let id = profile.id;
+        store.upsert(profile.clone()).unwrap();
+
+        let mut app = App::new(
+            vec![profile],
+            PathBuf::from("/usr/bin/rdp-tui"),
+            config_root,
+        );
+        app.handle_browsing(press(KeyCode::Char('C')));
+
+        assert_eq!(
+            app.profiles[0].security.certificate_policy,
+            CertificatePolicy::Ignore
+        );
+        let saved = store.get(id).unwrap().unwrap();
+        assert_eq!(saved.security.certificate_policy, CertificatePolicy::Ignore);
     }
 }
