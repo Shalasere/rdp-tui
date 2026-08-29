@@ -3,7 +3,7 @@
 use super::command::build_command;
 use crate::credentials::askpass::AskpassLease;
 use crate::model::{PreparedConnection, SessionId};
-use crate::runtime::process::{OwnedChild, spawn_child};
+use crate::runtime::process::{LaunchMode, OwnedChild, spawn_child};
 use crate::runtime::registry::ChildKind;
 use std::process::Command;
 
@@ -16,6 +16,7 @@ pub fn launch(
     prepared: &PreparedConnection,
     session: SessionId,
     askpass: Option<&AskpassLease>,
+    mode: LaunchMode,
 ) -> std::io::Result<OwnedChild> {
     let (executable, arguments, environment) = build_command(prepared);
     let mut command = Command::new(executable);
@@ -23,5 +24,5 @@ pub fn launch(
     if let Some(askpass) = askpass {
         command.envs(askpass.environment());
     }
-    spawn_child(&mut command, ChildKind::FreeRdp, session)
+    spawn_child(&mut command, ChildKind::FreeRdp, session, mode)
 }

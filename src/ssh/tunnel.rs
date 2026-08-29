@@ -1,7 +1,7 @@
 //! SSH local-forward command construction, startup, and identity-safe cleanup.
 
 use crate::model::{Endpoint, TunnelHandle};
-use crate::runtime::process::spawn_child;
+use crate::runtime::process::{LaunchMode, spawn_child};
 use crate::runtime::registry::{ChildKind, ProcessIdentity, still_matches};
 use std::ffi::OsString;
 use std::net::{TcpListener, TcpStream};
@@ -68,6 +68,9 @@ impl std::error::Error for TunnelError {}
 
 /// Establish one retained local SSH forward for a connection session.
 ///
+/// `mode` selects whether the tunnel backs a detached connect session or a
+/// one-shot test/preflight; it flows to the runtime spawn's detachment policy.
+///
 /// # Errors
 ///
 /// Returns a redacted startup or listener error. A lost ephemeral-port race is
@@ -77,8 +80,9 @@ pub fn establish(
     jump_host: &str,
     target: &Endpoint,
     session: crate::model::SessionId,
+    mode: LaunchMode,
 ) -> Result<TunnelHandle, TunnelError> {
-    establish_with("ssh", jump_host, target, session)
+    establish_with("ssh", jump_host, target, session, mode)
 }
 
 /// Terminate and reap a tunnel only after its compound identity still matches.
@@ -104,15 +108,16 @@ fn establish_with(
     jump_host: &str,
     target: &Endpoint,
     session: crate::model::SessionId,
+    mode: LaunchMode,
 ) -> Result<TunnelHandle, TunnelError> {
     establish_looping(PORT_ALLOCATION_ATTEMPTS, allocate_ephemeral_port, |port| {
-        try_establish_once(executable, jump_host, target, session, port)
+        try_establish_once(executable, jump_host, target, session, mode, port)
     })
 }
 
 /// Retry allocate-then-establish while a forward failure looks like a lost
 /// ephemeral-port race, bounded to `attempts`. Generic over the produced value
-/// so the retry policy is unit-testable without spawning a real tunnel.
+/// so the retry policy is unit-tested without spawning a real tunnel.
 fn establish_looping<T>(
     attempts: usize,
     mut allocate: impl FnMut() -> Result<u16, TunnelError>,
@@ -153,6 +158,7 @@ fn try_establish_once(
     jump_host: &str,
     target: &Endpoint,
     session: crate::model::SessionId,
+    mode: LaunchMode,
     port: u16,
 ) -> Result<TunnelHandle, TunnelError> {
     let local_endpoint = format!("127.0.0.1:{port}")
@@ -161,7 +167,7 @@ fn try_establish_once(
     let mut process = Command::new(executable);
     process.args(command(jump_host, port, target));
     let child =
-        spawn_child(&mut process, ChildKind::Tunnel, session).map_err(TunnelError::Spawn)?;
+        spawn_child(&mut process, ChildKind::Tunnel, session, mode).map_err(TunnelError::Spawn)?;
     let established_at = Instant::now();
     lock_identities()
         .map_err(TunnelError::Spawn)?
@@ -223,6 +229,7 @@ fn lock_identities()
 mod tests {
     use super::{TunnelError, establish_looping, establish_with};
     use crate::model::SessionId;
+    use crate::runtime::process::LaunchMode;
     use std::cell::Cell;
 
     fn test_session() -> SessionId {
@@ -238,6 +245,7 @@ mod tests {
             "jump",
             &"anima:3389".parse().unwrap(),
             test_session(),
+            LaunchMode::OneShot,
         )
         .unwrap_err();
         assert!(error.to_string().contains("exited"));

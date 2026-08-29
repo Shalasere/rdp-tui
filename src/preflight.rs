@@ -1,6 +1,7 @@
 //! Explicit conversion from a pure plan into a prepared connection.
 
 use crate::model::{ConnectionFailure, ConnectionPlan, PlannedRoute, PreparedConnection};
+use crate::runtime::process::LaunchMode;
 use crate::ssh::tunnel::establish;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -96,7 +97,10 @@ pub fn prepare_for_session(
     let PlannedRoute::SshTunnel { jump_host, target } = &plan.route else {
         return prepare(plan);
     };
-    let tunnel = establish(jump_host, target, session).map_err(|_| ConnectionFailure::Tunnel)?;
+    // One-shot until a detached connect supervisor owns the retained tunnel and
+    // requests LaunchMode::Detached explicitly.
+    let tunnel = establish(jump_host, target, session, LaunchMode::OneShot)
+        .map_err(|_| ConnectionFailure::Tunnel)?;
     Ok(PreparedConnection {
         plan: plan.clone(),
         effective_endpoint: tunnel.local_endpoint.clone(),

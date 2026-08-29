@@ -4,6 +4,7 @@ use crate::credentials::askpass::AskpassLease;
 use crate::credentials::{CredentialError, CredentialStore, acquire};
 use crate::freerdp::process::launch;
 use crate::model::{ConnectionFailure, PreparedConnection, SessionId, SessionResult};
+use crate::runtime::process::LaunchMode;
 use crate::ssh::tunnel::terminate;
 use std::path::Path;
 use std::time::Instant;
@@ -71,7 +72,9 @@ fn run_with_askpass(
 ) -> std::io::Result<SessionResult> {
     let started = Instant::now();
     let result = (|| {
-        let mut child = launch(prepared, session, askpass)?;
+        // A foreground session dies with its launcher; a detached connect
+        // owner is the session supervisor's responsibility, not this runner.
+        let mut child = launch(prepared, session, askpass, LaunchMode::OneShot)?;
         let status = child.wait()?;
         Ok(SessionResult {
             duration: started.elapsed(),

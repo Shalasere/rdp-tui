@@ -4,6 +4,7 @@ use rdp_tui::model::{
     Renderer, ResolvedCredentials, SecurityConfig, SessionId,
 };
 use rdp_tui::preflight::prepare;
+use rdp_tui::runtime::process::LaunchMode;
 use semver::Version;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -35,6 +36,7 @@ fn launch_uses_runtime_identity_ownership() {
             .parse::<SessionId>()
             .unwrap(),
         None,
+        LaunchMode::OneShot,
     )
     .unwrap();
     assert!(child.terminate_if_owned().unwrap().is_some());
