@@ -33,3 +33,23 @@ fn doctor_is_read_only_and_reports_each_renderer() {
     assert!(output.contains("x11:"));
     assert!(!root.join("profiles.toml").exists());
 }
+
+#[test]
+fn python_migration_upserts_profiles_without_modifying_the_source() {
+    let temporary = TempDir::new().expect("temporary config directory");
+    let root = temporary.path().to_path_buf();
+    let source = root.join("legacy.json");
+    let json =
+        r#"[{"id":"550e8400-e29b-41d4-a716-446655440000","name":"Anima","host":"10.0.0.111"}]"#;
+    std::fs::write(&source, json).unwrap();
+    assert_eq!(
+        run(
+            &["migrate".into(), "python".into(), "legacy.json".into()],
+            &root
+        )
+        .unwrap(),
+        "migrated: 1 profile(s); secrets were not migrated\n"
+    );
+    assert_eq!(std::fs::read_to_string(source).unwrap(), json);
+    assert!(run(&["list".into()], &root).unwrap().contains("Anima"));
+}

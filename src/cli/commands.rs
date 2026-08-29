@@ -2,6 +2,7 @@
 
 use crate::ProfileStore;
 use crate::config::ConfigStore;
+use crate::config::migrate::import_python_profiles;
 use crate::freerdp::discover::discover;
 use crate::model::{ProfileId, Renderer};
 use std::fmt::Write as _;
@@ -27,8 +28,26 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         )),
         [command] if command == "info" => Ok("rdp-tui Rust frontend: inspection mode\n".into()),
         [command] if command == "doctor" => Ok(doctor()),
+        [command, kind, source] if command == "migrate" && kind == "python" => {
+            migrate_python(&store, &config_root.join(source))
+        }
+        [command, kind] if command == "migrate" && kind == "python" => {
+            migrate_python(&store, &config_root.join("profiles.json"))
+        }
         _ => Err(usage().into()),
     }
+}
+
+fn migrate_python(store: &ProfileStore, source: &std::path::Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
+    let document = import_python_profiles(&text).map_err(|error| error.to_string())?;
+    let count = document.profiles.len();
+    for profile in document.profiles {
+        store.upsert(profile).map_err(|error| error.to_string())?;
+    }
+    Ok(format!(
+        "migrated: {count} profile(s); secrets were not migrated\n"
+    ))
 }
 
 fn doctor() -> String {
@@ -83,5 +102,5 @@ fn validate(store: &ProfileStore) -> Result<String, String> {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <profile-id> | validate | config-paths | info | doctor]"
+    "usage: rdp-tui [list | show <profile-id> | validate | config-paths | info | doctor | migrate python [profiles.json]]"
 }
