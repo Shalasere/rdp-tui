@@ -2,3 +2,4 @@
 pub mod capabilities;
 pub mod command;
 pub mod discover;
+pub mod process;
