@@ -92,3 +92,28 @@ pub fn remove(dir: &Path, session: SessionId) -> std::io::Result<()> {
         Err(error) => Err(error),
     }
 }
+
+/// Read every session record in `dir`, skipping unreadable or malformed files.
+/// A missing directory yields an empty list.
+///
+/// # Errors
+///
+/// Returns an I/O error only when the directory exists but cannot be listed.
+pub fn list(dir: &Path) -> std::io::Result<Vec<SessionRecord>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(std::ffi::OsStr::to_str) == Some("json")
+            && let Ok(bytes) = std::fs::read(&path)
+            && let Ok(record) = serde_json::from_slice::<SessionRecord>(&bytes)
+        {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}

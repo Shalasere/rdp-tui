@@ -116,6 +116,21 @@ fn doctor() -> String {
                 .expect("writing to a String cannot fail"),
         }
     }
+    if let Some(dir) = crate::session::record::sessions_dir() {
+        let sessions = crate::session::scan_sessions(&dir);
+        if sessions.is_empty() {
+            writeln!(output, "sessions: none active").expect("writing to a String cannot fail");
+        } else {
+            for status in sessions {
+                writeln!(
+                    output,
+                    "session {}: {:?} (profile {})",
+                    status.record.session_id, status.health, status.record.profile_id
+                )
+                .expect("writing to a String cannot fail");
+            }
+        }
+    }
     output
 }
 

@@ -15,6 +15,7 @@ use crate::model::{
 use crate::planner::plan;
 use crate::preflight::{prepare_for_session, verify_prepared};
 use crate::runtime::process::LaunchMode;
+use crate::runtime::registry::still_matches;
 use crate::ssh::tunnel::terminate;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -199,4 +200,46 @@ pub fn test_profile(profile: &Profile, timeout: Duration) -> Result<(), ConnectE
 fn plan_profile(profile: &Profile) -> Result<ConnectionPlan, ConnectError> {
     let discovered = discover(profile.display.renderer).map_err(ConnectError::Discover)?;
     plan(profile, &discovered.capabilities, discovered.client).map_err(ConnectError::Plan)
+}
+
+/// Health of a detached session as seen from its record.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SessionHealth {
+    /// The supervisor process is still alive and owns the session.
+    Running,
+    /// The supervisor is gone but a child (`FreeRDP` or tunnel) is still alive —
+    /// inconsistent ownership that `doctor` reports for an explicit decision.
+    Inconsistent,
+    /// Nothing the record referenced is still running; the record was removed.
+    Stale,
+}
+
+/// One session record paired with its current health.
+#[derive(Debug, Clone)]
+pub struct SessionStatus {
+    pub record: record::SessionRecord,
+    pub health: SessionHealth,
+}
+
+/// Reconcile the session records in `dir` against `/proc`, removing records
+/// whose processes are all gone (`session_supervisor` `failure_recovery`). This
+/// only reports and prunes stale records; it never signals or terminates a
+/// process, and every liveness test is a full compound-identity match (INV-11).
+#[must_use]
+pub fn scan_sessions(dir: &Path) -> Vec<SessionStatus> {
+    let mut statuses = Vec::new();
+    for record in record::list(dir).unwrap_or_default() {
+        let health = if still_matches(record.supervisor) {
+            SessionHealth::Running
+        } else if record.freerdp.is_some_and(still_matches)
+            || record.tunnel.is_some_and(still_matches)
+        {
+            SessionHealth::Inconsistent
+        } else {
+            let _ = record::remove(dir, record.session_id);
+            SessionHealth::Stale
+        };
+        statuses.push(SessionStatus { record, health });
+    }
+    statuses
 }
