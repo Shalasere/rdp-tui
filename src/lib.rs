@@ -2,3 +2,6 @@
 
 pub mod config;
 pub mod model;
+pub mod profile_store;
+
+pub use profile_store::ProfileStore;
