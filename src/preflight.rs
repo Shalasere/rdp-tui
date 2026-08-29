@@ -84,6 +84,24 @@ pub fn prepare(plan: &ConnectionPlan) -> Result<PreparedConnection, ConnectionFa
     })
 }
 
+/// Verify a prepared connection's reachable endpoint without re-preparing it,
+/// so a retained SSH tunnel is reused rather than reacquired (INV-6). A gateway
+/// route is checked at its gateway only (AP-5), never the internal target.
+///
+/// # Errors
+///
+/// Returns the DNS, timeout, and network failures reported by [`check_tcp`].
+pub fn verify_prepared(
+    prepared: &PreparedConnection,
+    timeout: Duration,
+) -> Result<(), ConnectionFailure> {
+    let endpoint = match &prepared.plan.route {
+        PlannedRoute::Direct | PlannedRoute::SshTunnel { .. } => &prepared.effective_endpoint,
+        PlannedRoute::RdGateway { gateway } => gateway,
+    };
+    check_tcp(endpoint, timeout)
+}
+
 /// Prepare a route for one session, retaining an SSH tunnel when required.
 ///
 /// # Errors

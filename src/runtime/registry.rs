@@ -13,6 +13,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 pub enum ChildKind {
     Tunnel,
     FreeRdp,
+    /// The detached connect-session owner itself, recorded for its own identity.
+    Supervisor,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]

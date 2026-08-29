@@ -1,6 +1,7 @@
 //! Shared one-shot session execution for future CLI and TUI callers.
 
 pub mod record;
+pub mod supervisor;
 
 use crate::credentials::askpass::AskpassLease;
 use crate::credentials::{CredentialError, CredentialStore, acquire};
