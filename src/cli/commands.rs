@@ -4,6 +4,7 @@ use crate::ProfileStore;
 use crate::config::ConfigStore;
 use crate::config::migrate::import_python_profiles;
 use crate::credentials::{forget_encrypted, store_encrypted_password};
+use crate::freerdp::certificate;
 use crate::freerdp::discover::discover;
 use crate::model::{CertificatePolicy, ConnectionPlan, Profile, ProfileId, Renderer};
 use crate::planner::plan;
@@ -36,7 +37,23 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [command, sub, id] if command == "credential" && sub == "clear" => {
             credential_clear(&store, config_root, id)
         }
-        [command, id, policy] if command == "certificate" => certificate_policy(&store, id, policy),
+        [command, sub, id] if command == "certificate" && sub == "show" => {
+            certificate_show(&store, config_root, id)
+        }
+        [command, sub, id] if command == "certificate" && sub == "backups" => {
+            certificate_backups(&store, id)
+        }
+        [command, sub, id, policy] if command == "certificate" && sub == "policy" => {
+            certificate_policy(&store, id, policy)
+        }
+        [command, sub, id, backup] if command == "certificate" && sub == "restore" => {
+            certificate_restore(&store, config_root, id, backup)
+        }
+        [command, sub, id, flag, fingerprint]
+            if command == "certificate" && sub == "trust" && flag == "--fingerprint" =>
+        {
+            certificate_trust(&store, config_root, id, fingerprint)
+        }
         [command] if command == "config-paths" => Ok(format!(
             "config.toml: {}\nprofiles.toml: {}\n",
             config_root.join("config.toml").display(),
@@ -169,6 +186,127 @@ fn parse_certificate_policy(value: &str) -> Result<CertificatePolicy, String> {
     }
 }
 
+fn certificate_show(
+    store: &ProfileStore,
+    config_root: &Path,
+    value: &str,
+) -> Result<String, String> {
+    let profile = load_profile(store, value)?;
+    let (host, port) = endpoint_host_port(&profile);
+    let pin = certificate::pin_path(&freerdp_config_dir(config_root), &host, port);
+    let pinned = certificate::fingerprint(&pin).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "profile: {}\nendpoint: {}\npolicy: {:?}\npinned: {}\n",
+        profile.name,
+        profile.endpoint,
+        profile.security.certificate_policy,
+        pinned.as_deref().unwrap_or("none"),
+    ))
+}
+
+fn certificate_backups(store: &ProfileStore, value: &str) -> Result<String, String> {
+    let profile = load_profile(store, value)?;
+    let (host, port) = endpoint_host_port(&profile);
+    let prefix = format!("{host}_{port}.pem.");
+    let mut names: Vec<String> = match std::fs::read_dir(certificate_backups_dir()) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with(&prefix))
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.to_string()),
+    };
+    names.sort();
+    if names.is_empty() {
+        Ok(format!("no certificate backups for {}\n", profile.name))
+    } else {
+        Ok(format!("{}\n", names.join("\n")))
+    }
+}
+
+fn certificate_restore(
+    store: &ProfileStore,
+    config_root: &Path,
+    value: &str,
+    backup: &str,
+) -> Result<String, String> {
+    let profile = load_profile(store, value)?;
+    let (host, port) = endpoint_host_port(&profile);
+    if !backup.starts_with(&format!("{host}_{port}.pem.")) {
+        return Err(format!(
+            "backup {backup} does not belong to {}",
+            profile.name
+        ));
+    }
+    let source = certificate_backups_dir().join(backup);
+    if !source.exists() {
+        return Err(format!("backup {backup} was not found"));
+    }
+    let pin = certificate::pin_path(&freerdp_config_dir(config_root), &host, port);
+    if let Some(parent) = pin.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::rename(&source, &pin).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "restored {backup} as the pinned certificate for {}\n",
+        profile.name
+    ))
+}
+
+fn certificate_trust(
+    store: &ProfileStore,
+    config_root: &Path,
+    value: &str,
+    fingerprint: &str,
+) -> Result<String, String> {
+    let normalized = fingerprint.replace(':', "").to_ascii_uppercase();
+    if normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("a full 64-hex-character SHA-256 fingerprint is required".into());
+    }
+    let mut profile = load_profile(store, value)?;
+    let name = profile.name.clone();
+    let (host, port) = endpoint_host_port(&profile);
+    let pin = certificate::pin_path(&freerdp_config_dir(config_root), &host, port);
+    // Archive the old pin so the next connection re-pins the trusted certificate.
+    if certificate::fingerprint(&pin)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        certificate::archive(&pin, &certificate_backups_dir(), None)
+            .map_err(|error| error.to_string())?;
+    }
+    profile.security.certificate_policy = CertificatePolicy::Tofu;
+    store.upsert(profile).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "trusting {normalized} for {name}; reconnect to pin it (policy set to tofu)\n"
+    ))
+}
+
+fn freerdp_config_dir(config_root: &Path) -> PathBuf {
+    // config_root is $XDG_CONFIG_HOME/rdp-tui; FreeRDP pins live under $XDG_CONFIG_HOME/freerdp.
+    config_root
+        .parent()
+        .map_or_else(|| PathBuf::from("freerdp"), |base| base.join("freerdp"))
+}
+
+fn certificate_backups_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from(".local/state"))
+        .join("rdp-tui")
+        .join("certificate-backups")
+}
+
+fn endpoint_host_port(profile: &Profile) -> (String, u16) {
+    let text = profile.endpoint.to_string();
+    match text.rsplit_once(':') {
+        Some((host, port)) => (host.to_string(), port.parse().unwrap_or(3389)),
+        None => (text, 3389),
+    }
+}
+
 fn migrate_python(store: &ProfileStore, source: &std::path::Path) -> Result<String, String> {
     let text = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
     let document = import_python_profiles(&text).map_err(|error| error.to_string())?;
@@ -242,7 +380,7 @@ fn validate(store: &ProfileStore) -> Result<String, String> {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | connect <id> | credential set|clear <id> | certificate <id> <tofu|system|ignore|deny> | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | connect <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | config-paths | info | doctor | migrate python [profiles.json]]"
 }
 
 #[cfg(test)]
@@ -308,5 +446,35 @@ mod tests {
         assert_eq!(saved.security.certificate_policy, CertificatePolicy::Tofu);
 
         assert!(super::certificate_policy(&store, &id.to_string(), "bogus").is_err());
+    }
+
+    #[test]
+    fn certificate_show_reports_no_pin_when_absent() {
+        let dir = TempDir::new().unwrap();
+        let config_root = dir.path().join("rdp-tui");
+        let store = ProfileStore::new(ConfigStore::new(config_root.as_path()));
+        let profile = sample_profile();
+        let id = profile.id;
+        store.upsert(profile).unwrap();
+
+        let output =
+            super::certificate_show(&store, config_root.as_path(), &id.to_string()).unwrap();
+        assert!(output.contains("pinned: none"));
+        assert!(output.contains("10.0.0.5:3389"));
+    }
+
+    #[test]
+    fn certificate_trust_requires_a_full_fingerprint() {
+        let dir = TempDir::new().unwrap();
+        let config_root = dir.path().join("rdp-tui");
+        let store = ProfileStore::new(ConfigStore::new(config_root.as_path()));
+        let profile = sample_profile();
+        let id = profile.id;
+        store.upsert(profile).unwrap();
+
+        assert!(
+            super::certificate_trust(&store, config_root.as_path(), &id.to_string(), "ab:cd")
+                .is_err()
+        );
     }
 }
