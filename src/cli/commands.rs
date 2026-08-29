@@ -1,20 +1,25 @@
-//! Read-only command implementations for the Rust frontend.
+//! Read-only and connection command implementations for the Rust frontend.
 
 use crate::ProfileStore;
 use crate::config::ConfigStore;
 use crate::config::migrate::import_python_profiles;
 use crate::freerdp::discover::discover;
-use crate::model::{ProfileId, Renderer};
+use crate::model::{ConnectionPlan, Profile, ProfileId, Renderer, RouteHandle, SessionId};
 use crate::planner::plan;
+use crate::preflight::{prepare_for_session, verify_prepared};
+use crate::session::launcher::spawn_supervisor;
+use crate::ssh::tunnel::terminate;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::time::Duration;
 
-/// Run a read-only CLI command and return text suitable for stdout.
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run a CLI command and return text suitable for stdout.
 ///
 /// # Errors
 ///
-/// Returns a user-facing error when arguments are invalid or configuration
-/// cannot be loaded and validated.
+/// Returns a user-facing error when arguments are invalid or a command fails.
 pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String> {
     let store = ProfileStore::new(ConfigStore::new(config_root));
     match arguments {
@@ -23,6 +28,8 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [command, id] if command == "show" => show(&store, id),
         [command, id] if command == "inspect" => inspect(&store, id),
         [command] if command == "validate" => validate(&store),
+        [command, id] if command == "test" => test(&store, id),
+        [command, id] if command == "connect" => connect(&store, id),
         [command] if command == "config-paths" => Ok(format!(
             "config.toml: {}\nprofiles.toml: {}\n",
             config_root.join("config.toml").display(),
@@ -40,17 +47,25 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
     }
 }
 
-fn inspect(store: &ProfileStore, value: &str) -> Result<String, String> {
+fn load_profile(store: &ProfileStore, value: &str) -> Result<Profile, String> {
     let id = value
         .parse::<ProfileId>()
         .map_err(|error| error.to_string())?;
-    let profile = store
+    store
         .get(id)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("profile {id} was not found"))?;
+        .ok_or_else(|| format!("profile {id} was not found"))
+}
+
+fn plan_for(profile: &Profile) -> Result<ConnectionPlan, String> {
     let discovered = discover(profile.display.renderer)?;
-    let connection = plan(&profile, &discovered.capabilities, discovered.client)
-        .map_err(|error| format!("cannot inspect profile: {error:?}"))?;
+    plan(profile, &discovered.capabilities, discovered.client)
+        .map_err(|error| format!("cannot plan connection: {error:?}"))
+}
+
+fn inspect(store: &ProfileStore, value: &str) -> Result<String, String> {
+    let profile = load_profile(store, value)?;
+    let connection = plan_for(&profile)?;
     Ok(format!(
         "profile: {}\ntarget: {}\nroute: {:?}\nclient: {} {}\n",
         profile.name,
@@ -58,6 +73,33 @@ fn inspect(store: &ProfileStore, value: &str) -> Result<String, String> {
         connection.route,
         connection.client.executable.display(),
         connection.client.version
+    ))
+}
+
+fn test(store: &ProfileStore, value: &str) -> Result<String, String> {
+    let profile = load_profile(store, value)?;
+    let plan = plan_for(&profile)?;
+    let session = SessionId::generate();
+    let mut prepared = prepare_for_session(&plan, session)
+        .map_err(|error| format!("cannot prepare {}: {error:?}", profile.name))?;
+    let reachable = verify_prepared(&prepared, TEST_TIMEOUT);
+    // A standalone test is one-shot: tear the retained tunnel down again.
+    if let Some(RouteHandle::SshTunnel(handle)) = &mut prepared.route_handle {
+        let _ = terminate(handle);
+    }
+    reachable.map_err(|error| format!("{} is not reachable: {error:?}", profile.name))?;
+    Ok(format!("test: {} is reachable\n", profile.name))
+}
+
+fn connect(store: &ProfileStore, value: &str) -> Result<String, String> {
+    let profile = load_profile(store, value)?;
+    let plan = plan_for(&profile)?;
+    let session = SessionId::generate();
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    spawn_supervisor(&plan, profile.id, session, &executable).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "connect: launched detached session {session} for {}\n",
+        profile.name
     ))
 }
 
@@ -109,13 +151,7 @@ fn list(store: &ProfileStore) -> Result<String, String> {
 }
 
 fn show(store: &ProfileStore, value: &str) -> Result<String, String> {
-    let id = value
-        .parse::<ProfileId>()
-        .map_err(|error| error.to_string())?;
-    let profile = store
-        .get(id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("profile {id} was not found"))?;
+    let profile = load_profile(store, value)?;
     toml::to_string_pretty(&profile).map_err(|error| error.to_string())
 }
 
@@ -125,5 +161,5 @@ fn validate(store: &ProfileStore) -> Result<String, String> {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <profile-id> | inspect <profile-id> | validate | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | connect <id> | config-paths | info | doctor | migrate python [profiles.json]]"
 }

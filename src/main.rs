@@ -15,6 +15,18 @@ fn main() -> ExitCode {
             }
         };
     }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "__supervise")
+    {
+        return match rdp_tui::session::launcher::run_from_environment() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("rdp-tui supervise: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match rdp_tui::cli::commands::run(&arguments, &config_root()) {
         Ok(output) => {
             print!("{output}");

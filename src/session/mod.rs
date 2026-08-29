@@ -1,5 +1,6 @@
 //! Shared one-shot session execution for future CLI and TUI callers.
 
+pub mod launcher;
 pub mod record;
 pub mod supervisor;
 

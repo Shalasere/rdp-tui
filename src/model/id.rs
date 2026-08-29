@@ -17,6 +17,20 @@ macro_rules! uuid_id {
             pub const fn as_bytes(&self) -> &[u8; 16] {
                 &self.0
             }
+
+            /// Mint a fresh random (version 4) identifier.
+            ///
+            /// # Panics
+            ///
+            /// Panics only if the operating system cannot provide randomness.
+            #[must_use]
+            pub fn generate() -> Self {
+                let mut bytes = [0u8; 16];
+                getrandom::fill(&mut bytes).expect("system randomness is available");
+                bytes[6] = (bytes[6] & 0x0f) | 0x40; // RFC 4122 version 4
+                bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+                Self(bytes)
+            }
         }
 
         impl FromStr for $name {
@@ -191,6 +205,17 @@ mod tests {
         assert_eq!(id.to_string(), text);
         let yaml = serde_yaml_ng::to_string(&id).unwrap();
         assert_eq!(serde_yaml_ng::from_str::<ProfileId>(&yaml).unwrap(), id);
+    }
+
+    #[test]
+    fn generated_ids_are_distinct_version_4_uuids() {
+        let first = ProfileId::generate();
+        let second = ProfileId::generate();
+        assert_ne!(first, second);
+        let text = first.to_string();
+        assert!(text.parse::<ProfileId>().is_ok());
+        assert_eq!(text.as_bytes()[14], b'4');
+        assert!(matches!(text.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
     }
 
     #[test]

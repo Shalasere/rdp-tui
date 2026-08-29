@@ -2,9 +2,12 @@
 
 pub mod askpass;
 
-use crate::model::{CredentialRef, ResolvedCredentials};
+use crate::model::{CredentialBackend, CredentialRef, ResolvedCredentials};
+use crate::secret::file::EncryptedFileStore;
+use crate::secret::service::SecretServiceStore;
 use secrecy::SecretString;
 use std::fmt;
+use std::path::PathBuf;
 
 /// A backend that resolves durable credential references into launch-time secrets.
 pub trait CredentialStore {
@@ -14,6 +17,35 @@ pub trait CredentialStore {
     ///
     /// Returns a typed error when the backend cannot provide the requested secret.
     fn retrieve(&self, reference: CredentialRef) -> Result<SecretString, CredentialError>;
+}
+
+/// A credential store that dispatches each reference to its pinned backend.
+///
+/// The backend is read from the concrete `CredentialRef`, never re-resolved
+/// from the environment (INV-4).
+pub struct SystemCredentialStore {
+    secret_service: SecretServiceStore,
+    encrypted_file: EncryptedFileStore,
+}
+
+impl SystemCredentialStore {
+    /// Build a system store rooted at the rdp-tui configuration directory.
+    #[must_use]
+    pub fn new(config_root: impl Into<PathBuf>) -> Self {
+        Self {
+            secret_service: SecretServiceStore::default(),
+            encrypted_file: EncryptedFileStore::new(config_root),
+        }
+    }
+}
+
+impl CredentialStore for SystemCredentialStore {
+    fn retrieve(&self, reference: CredentialRef) -> Result<SecretString, CredentialError> {
+        match reference.backend {
+            CredentialBackend::SecretService => self.secret_service.retrieve(reference),
+            CredentialBackend::EncryptedFile => self.encrypted_file.retrieve(reference),
+        }
+    }
 }
 
 /// Non-serializable secrets held only for the lifetime of a connection attempt.
