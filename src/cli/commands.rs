@@ -6,7 +6,10 @@ use crate::config::migrate::import_python_profiles;
 use crate::credentials::{SystemCredentialStore, forget_encrypted, store_encrypted_password};
 use crate::freerdp::certificate;
 use crate::freerdp::discover::discover;
-use crate::model::{CertificatePolicy, ConnectionPlan, Profile, ProfileId, Renderer};
+use crate::model::{
+    CertificatePolicy, ConnectionPlan, DeviceConfig, DisplayConfig, Endpoint, IdentityConfig,
+    Profile, ProfileId, Renderer, Route, SecurityConfig,
+};
 use crate::planner::plan;
 use crate::session::{connect_profile, test_profile};
 use secrecy::SecretString;
@@ -54,6 +57,12 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
             if command == "certificate" && sub == "trust" && flag == "--fingerprint" =>
         {
             certificate_trust(&store, config_root, id, fingerprint)
+        }
+        [command, name, host] if command == "add" => add_command(&store, name, host),
+        [command, id] if command == "delete" => delete_command(&store, config_root, id),
+        [command, id] if command == "clone" => clone_command(&store, id),
+        [command, id, field, new_value] if command == "set" => {
+            set_command(&store, id, field, new_value)
         }
         [command, path] if command == "import" => import_command(&store, path),
         [command, id, path] if command == "export" => export_command(&store, id, path),
@@ -351,6 +360,153 @@ fn export_command(store: &ProfileStore, value: &str, path: &str) -> Result<Strin
     ))
 }
 
+fn add_command(store: &ProfileStore, name: &str, host: &str) -> Result<String, String> {
+    let endpoint = host
+        .parse::<Endpoint>()
+        .map_err(|error| format!("invalid host '{host}': {error}"))?;
+    let profile = Profile {
+        id: ProfileId::generate(),
+        name: name.to_owned(),
+        endpoint,
+        identity: IdentityConfig::default(),
+        route: Route::Direct,
+        display: DisplayConfig::default(),
+        devices: DeviceConfig::default(),
+        security: SecurityConfig::default(),
+        credential: None,
+    };
+    let id = profile.id;
+    store.upsert(profile).map_err(|error| error.to_string())?;
+    Ok(format!("added {name} as {id}\n"))
+}
+
+fn delete_command(store: &ProfileStore, config_root: &Path, value: &str) -> Result<String, String> {
+    let profile = load_profile(store, value)?;
+    let name = profile.name.clone();
+    // Forget the pinned secret before removing the profile that references it.
+    if let Some(reference) = profile.credential {
+        forget_encrypted(config_root, reference);
+    }
+    store
+        .remove(profile.id)
+        .map_err(|error| error.to_string())?;
+    Ok(format!("deleted {name}\n"))
+}
+
+fn clone_command(store: &ProfileStore, value: &str) -> Result<String, String> {
+    let mut profile = load_profile(store, value)?;
+    profile.id = ProfileId::generate();
+    profile.name = format!("{} (copy)", profile.name);
+    // A clone starts without the source's secret: the CredentialRef points at one
+    // stored file, and sharing it would let deleting either profile forget both.
+    profile.credential = None;
+    let (id, name) = (profile.id, profile.name.clone());
+    store.upsert(profile).map_err(|error| error.to_string())?;
+    Ok(format!("cloned to {name} ({id})\n"))
+}
+
+fn set_command(
+    store: &ProfileStore,
+    value: &str,
+    field: &str,
+    new_value: &str,
+) -> Result<String, String> {
+    let mut profile = load_profile(store, value)?;
+    match field {
+        "name" => new_value.clone_into(&mut profile.name),
+        "host" => {
+            profile.endpoint = new_value
+                .parse::<Endpoint>()
+                .map_err(|error| format!("invalid host '{new_value}': {error}"))?;
+        }
+        "username" => new_value.clone_into(&mut profile.identity.username),
+        "domain" => new_value.clone_into(&mut profile.identity.domain),
+        "fullscreen" => profile.display.fullscreen = parse_bool_value(new_value)?,
+        "renderer" => profile.display.renderer = parse_renderer_value(new_value)?,
+        "resolution" => {
+            profile.display.resolution = if new_value.eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(parse_resolution_value(new_value)?)
+            };
+        }
+        "route" => profile.route = parse_route_value(new_value)?,
+        other => {
+            return Err(format!(
+                "unknown field '{other}' (name | host | username | domain | fullscreen | renderer | resolution | route)"
+            ));
+        }
+    }
+    let name = profile.name.clone();
+    store.upsert(profile).map_err(|error| error.to_string())?;
+    Ok(format!("set {field} on {name}\n"))
+}
+
+fn parse_bool_value(value: &str) -> Result<bool, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Ok(true),
+        "false" | "no" | "off" | "0" => Ok(false),
+        other => Err(format!("expected a yes/no value, got '{other}'")),
+    }
+}
+
+fn parse_renderer_value(value: &str) -> Result<Renderer, String> {
+    match value {
+        "wayland_sdl" | "sdl" | "wayland" => Ok(Renderer::WaylandSdl),
+        "x11" | "xfreerdp" => Ok(Renderer::X11),
+        other => Err(format!(
+            "unknown renderer '{other}' (use wayland_sdl | x11)"
+        )),
+    }
+}
+
+fn parse_resolution_value(value: &str) -> Result<(u16, u16), String> {
+    let (width, height) = value
+        .split_once(['x', 'X'])
+        .ok_or_else(|| format!("resolution must be WIDTHxHEIGHT, got '{value}'"))?;
+    let width = width
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| format!("invalid width in '{value}'"))?;
+    let height = height
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| format!("invalid height in '{value}'"))?;
+    Ok((width, height))
+}
+
+fn parse_route_value(value: &str) -> Result<Route, String> {
+    if value == "direct" {
+        return Ok(Route::Direct);
+    }
+    if let Some(host) = value.strip_prefix("gateway:") {
+        // RD Gateways speak HTTPS, so an unqualified gateway defaults to 443.
+        let with_port = if host.contains(':') {
+            host.to_owned()
+        } else {
+            format!("{host}:443")
+        };
+        let gateway = with_port
+            .parse::<Endpoint>()
+            .map_err(|error| format!("invalid gateway '{host}': {error}"))?;
+        return Ok(Route::RdGateway {
+            gateway,
+            credential: None,
+        });
+    }
+    if let Some(jump_host) = value.strip_prefix("ssh:") {
+        if jump_host.is_empty() {
+            return Err("ssh route needs a jump host (ssh:<host>)".into());
+        }
+        return Ok(Route::SshTunnel {
+            jump_host: jump_host.to_owned(),
+        });
+    }
+    Err(format!(
+        "unknown route '{value}' (use direct | gateway:<host> | ssh:<jump-host>)"
+    ))
+}
+
 fn same_except_id(current: &Profile, incoming: &Profile) -> bool {
     let mut incoming = incoming.clone();
     incoming.id = current.id;
@@ -480,7 +636,7 @@ fn state_dir() -> PathBuf {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> | connect <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | export <id> <path> | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> | connect <id> | add <name> <host> | set <id> <field> <value> | clone <id> | delete <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | export <id> <path> | config-paths | info | doctor | migrate python [profiles.json]]"
 }
 
 #[cfg(test)]
@@ -561,6 +717,59 @@ mod tests {
             super::certificate_show(&store, config_root.as_path(), &id.to_string()).unwrap();
         assert!(output.contains("pinned: none"));
         assert!(output.contains("10.0.0.5:3389"));
+    }
+
+    #[test]
+    fn add_creates_a_direct_profile_and_set_edits_its_fields() {
+        let dir = TempDir::new().unwrap();
+        let store = ProfileStore::new(ConfigStore::new(dir.path()));
+
+        super::add_command(&store, "Workbench", "10.0.0.9").unwrap();
+        let created = store.list().unwrap();
+        assert_eq!(created.len(), 1);
+        let profile = &created[0];
+        assert_eq!(profile.name, "Workbench");
+        assert_eq!(profile.endpoint.to_string(), "10.0.0.9:3389");
+        assert!(matches!(profile.route, Route::Direct));
+
+        let id = profile.id.to_string();
+        super::set_command(&store, &id, "username", "operator").unwrap();
+        super::set_command(&store, &id, "host", "10.0.0.9:9833").unwrap();
+        super::set_command(&store, &id, "resolution", "1920x1080").unwrap();
+        super::set_command(&store, &id, "route", "ssh:jump.example").unwrap();
+
+        let saved = store.get(profile.id).unwrap().unwrap();
+        assert_eq!(saved.identity.username, "operator");
+        assert_eq!(saved.endpoint.to_string(), "10.0.0.9:9833");
+        assert_eq!(saved.display.resolution, Some((1920, 1080)));
+        assert!(matches!(saved.route, Route::SshTunnel { .. }));
+
+        assert!(super::set_command(&store, &id, "route", "bogus").is_err());
+        assert!(super::set_command(&store, &id, "nonesuch", "x").is_err());
+    }
+
+    #[test]
+    fn clone_duplicates_a_profile_without_its_credential_and_delete_removes_it() {
+        let dir = TempDir::new().unwrap();
+        let config_root = dir.path().to_path_buf();
+        let store = ProfileStore::new(ConfigStore::new(&config_root));
+        let mut profile = sample_profile();
+        profile.identity.username = "operator".into();
+        let original = profile.id;
+        store.upsert(profile.clone()).unwrap();
+        set_profile_credential(&store, &config_root, profile, "hunter2").unwrap();
+
+        super::clone_command(&store, &original.to_string()).unwrap();
+        let all = store.list().unwrap();
+        assert_eq!(all.len(), 2);
+        let copy = all.iter().find(|current| current.id != original).unwrap();
+        assert_eq!(copy.name, "Sample (copy)");
+        assert_eq!(copy.identity.username, "operator");
+        assert!(copy.credential.is_none(), "a clone starts without a secret");
+
+        super::delete_command(&store, &config_root, &original.to_string()).unwrap();
+        assert!(store.get(original).unwrap().is_none());
+        assert_eq!(store.list().unwrap().len(), 1);
     }
 
     #[test]
