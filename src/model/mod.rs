@@ -1,6 +1,7 @@
 pub mod credential;
 pub mod endpoint;
 pub mod failure;
+pub mod fields;
 pub mod id;
 pub mod plan;
 pub mod prepared;

@@ -6,6 +6,7 @@ use crate::config::migrate::import_python_profiles;
 use crate::credentials::{SystemCredentialStore, forget_encrypted, store_encrypted_password};
 use crate::freerdp::certificate;
 use crate::freerdp::discover::discover;
+use crate::model::fields;
 use crate::model::{
     CertificatePolicy, ConnectionPlan, DeviceConfig, DisplayConfig, Endpoint, IdentityConfig,
     Profile, ProfileId, Renderer, Route, SecurityConfig,
@@ -178,24 +179,14 @@ pub fn set_profile_credential(
 }
 
 fn certificate_policy(store: &ProfileStore, value: &str, policy: &str) -> Result<String, String> {
-    let policy = parse_certificate_policy(policy)?;
+    let policy = CertificatePolicy::from_token(policy).ok_or_else(|| {
+        format!("unknown certificate policy '{policy}' (use tofu | system | ignore | deny)")
+    })?;
     let mut profile = load_profile(store, value)?;
     let name = profile.name.clone();
     profile.security.certificate_policy = policy;
     store.upsert(profile).map_err(|error| error.to_string())?;
     Ok(format!("certificate: {name} now uses {policy:?}\n"))
-}
-
-fn parse_certificate_policy(value: &str) -> Result<CertificatePolicy, String> {
-    match value {
-        "tofu" => Ok(CertificatePolicy::Tofu),
-        "system" => Ok(CertificatePolicy::System),
-        "ignore" => Ok(CertificatePolicy::Ignore),
-        "deny" => Ok(CertificatePolicy::Deny),
-        other => Err(format!(
-            "unknown certificate policy '{other}' (use tofu | system | ignore | deny)"
-        )),
-    }
 }
 
 fn certificate_show(
@@ -421,26 +412,23 @@ fn set_command(
         }
         "username" => new_value.clone_into(&mut profile.identity.username),
         "domain" => new_value.clone_into(&mut profile.identity.domain),
-        "fullscreen" => profile.display.fullscreen = parse_bool_value(new_value)?,
-        "renderer" => profile.display.renderer = parse_renderer_value(new_value)?,
-        "resolution" => {
-            profile.display.resolution = if new_value.eq_ignore_ascii_case("none") {
-                None
-            } else {
-                Some(parse_resolution_value(new_value)?)
-            };
+        "fullscreen" => profile.display.fullscreen = fields::parse_bool(new_value)?,
+        "renderer" => {
+            profile.display.renderer = Renderer::from_token(new_value)
+                .ok_or_else(|| format!("unknown renderer '{new_value}' (use wayland_sdl | x11)"))?;
         }
-        "route" => profile.route = parse_route_value(new_value)?,
-        "multimon" => profile.display.multimon = parse_bool_value(new_value)?,
-        "span-monitors" => profile.display.span_monitors = parse_bool_value(new_value)?,
-        "smart-sizing" => profile.display.smart_sizing = parse_bool_value(new_value)?,
-        "dynamic-resolution" => profile.display.dynamic_resolution = parse_bool_value(new_value)?,
-        "scale" => profile.display.scale_percent = parse_optional_u16(new_value)?,
-        "color-depth" => profile.display.color_depth = parse_optional_u8(new_value)?,
-        "clipboard" => profile.devices.clipboard = parse_bool_value(new_value)?,
-        "audio" => profile.devices.audio_playback = parse_bool_value(new_value)?,
-        "microphone" => profile.devices.microphone = parse_bool_value(new_value)?,
-        "printers" => profile.devices.printers = parse_bool_value(new_value)?,
+        "resolution" => profile.display.resolution = fields::parse_resolution(new_value)?,
+        "route" => profile.route = Route::from_token(new_value)?,
+        "multimon" => profile.display.multimon = fields::parse_bool(new_value)?,
+        "span-monitors" => profile.display.span_monitors = fields::parse_bool(new_value)?,
+        "smart-sizing" => profile.display.smart_sizing = fields::parse_bool(new_value)?,
+        "dynamic-resolution" => profile.display.dynamic_resolution = fields::parse_bool(new_value)?,
+        "scale" => profile.display.scale_percent = fields::parse_scale(new_value)?,
+        "color-depth" => profile.display.color_depth = fields::parse_color_depth(new_value)?,
+        "clipboard" => profile.devices.clipboard = fields::parse_bool(new_value)?,
+        "audio" => profile.devices.audio_playback = fields::parse_bool(new_value)?,
+        "microphone" => profile.devices.microphone = fields::parse_bool(new_value)?,
+        "printers" => profile.devices.printers = fields::parse_bool(new_value)?,
         other => {
             return Err(format!(
                 "unknown field '{other}' (name | host | username | domain | fullscreen | \
@@ -453,91 +441,6 @@ fn set_command(
     let name = profile.name.clone();
     store.upsert(profile).map_err(|error| error.to_string())?;
     Ok(format!("set {field} on {name}\n"))
-}
-
-fn parse_bool_value(value: &str) -> Result<bool, String> {
-    match value.to_ascii_lowercase().as_str() {
-        "true" | "yes" | "on" | "1" => Ok(true),
-        "false" | "no" | "off" | "0" => Ok(false),
-        other => Err(format!("expected a yes/no value, got '{other}'")),
-    }
-}
-
-fn parse_optional_u16(value: &str) -> Result<Option<u16>, String> {
-    if value.is_empty() || value.eq_ignore_ascii_case("none") {
-        return Ok(None);
-    }
-    value
-        .parse::<u16>()
-        .map(Some)
-        .map_err(|_| format!("expected a number or 'none', got '{value}'"))
-}
-
-fn parse_optional_u8(value: &str) -> Result<Option<u8>, String> {
-    if value.is_empty() || value.eq_ignore_ascii_case("none") {
-        return Ok(None);
-    }
-    value
-        .parse::<u8>()
-        .map(Some)
-        .map_err(|_| format!("expected a number or 'none', got '{value}'"))
-}
-
-fn parse_renderer_value(value: &str) -> Result<Renderer, String> {
-    match value {
-        "wayland_sdl" | "sdl" | "wayland" => Ok(Renderer::WaylandSdl),
-        "x11" | "xfreerdp" => Ok(Renderer::X11),
-        other => Err(format!(
-            "unknown renderer '{other}' (use wayland_sdl | x11)"
-        )),
-    }
-}
-
-fn parse_resolution_value(value: &str) -> Result<(u16, u16), String> {
-    let (width, height) = value
-        .split_once(['x', 'X'])
-        .ok_or_else(|| format!("resolution must be WIDTHxHEIGHT, got '{value}'"))?;
-    let width = width
-        .trim()
-        .parse::<u16>()
-        .map_err(|_| format!("invalid width in '{value}'"))?;
-    let height = height
-        .trim()
-        .parse::<u16>()
-        .map_err(|_| format!("invalid height in '{value}'"))?;
-    Ok((width, height))
-}
-
-fn parse_route_value(value: &str) -> Result<Route, String> {
-    if value == "direct" {
-        return Ok(Route::Direct);
-    }
-    if let Some(host) = value.strip_prefix("gateway:") {
-        // RD Gateways speak HTTPS, so an unqualified gateway defaults to 443.
-        let with_port = if host.contains(':') {
-            host.to_owned()
-        } else {
-            format!("{host}:443")
-        };
-        let gateway = with_port
-            .parse::<Endpoint>()
-            .map_err(|error| format!("invalid gateway '{host}': {error}"))?;
-        return Ok(Route::RdGateway {
-            gateway,
-            credential: None,
-        });
-    }
-    if let Some(jump_host) = value.strip_prefix("ssh:") {
-        if jump_host.is_empty() {
-            return Err("ssh route needs a jump host (ssh:<host>)".into());
-        }
-        return Ok(Route::SshTunnel {
-            jump_host: jump_host.to_owned(),
-        });
-    }
-    Err(format!(
-        "unknown route '{value}' (use direct | gateway:<host> | ssh:<jump-host>)"
-    ))
 }
 
 fn same_except_id(current: &Profile, incoming: &Profile) -> bool {
