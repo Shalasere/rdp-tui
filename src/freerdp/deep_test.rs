@@ -70,8 +70,14 @@ pub fn authenticate(
 
 fn classify(output: &str) -> AuthOutcome {
     if output.contains("LOGON_FAILURE") {
+        // The host reached the auth stage and rejected the credentials.
         AuthOutcome::LogonFailure
+    } else if output.contains("CONNECT_CANCELLED") {
+        // Auth-only completes NLA and then tears the RDP connect down; without a
+        // logon failure, that cancellation means the credentials were accepted.
+        AuthOutcome::Authenticated
     } else if output.contains("ERRCONNECT") {
+        // Failed before the auth stage — DNS, TCP, or pre-connect.
         AuthOutcome::Unreachable
     } else {
         AuthOutcome::Authenticated
@@ -93,17 +99,26 @@ mod tests {
     #[test]
     fn classifies_an_unreachable_target() {
         assert_eq!(
-            classify("ERRCONNECT_CONNECT_CANCELLED could not connect"),
+            classify("ERRCONNECT_CONNECT_FAILED could not reach host"),
             AuthOutcome::Unreachable
         );
     }
 
     #[test]
-    fn classifies_a_successful_authentication() {
+    fn classifies_a_cancelled_connect_after_auth_as_authenticated() {
+        // Auth-only tears the RDP connect down once NLA succeeds.
         assert_eq!(
             classify(
-                "Authentication only. Don't connect to X.\nAuthentication only, exit status 0"
+                "kerberos noise\nAuthentication only, exit status 1\nERRCONNECT_CONNECT_CANCELLED [0x0002000B]"
             ),
+            AuthOutcome::Authenticated
+        );
+    }
+
+    #[test]
+    fn classifies_a_clean_authentication() {
+        assert_eq!(
+            classify("Authentication only. Don't connect to X."),
             AuthOutcome::Authenticated
         );
     }
