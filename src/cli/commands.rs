@@ -54,6 +54,7 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         {
             certificate_trust(&store, config_root, id, fingerprint)
         }
+        [command, path] if command == "import" => import_command(&store, path),
         [command] if command == "config-paths" => Ok(format!(
             "config.toml: {}\nprofiles.toml: {}\n",
             config_root.join("config.toml").display(),
@@ -307,6 +308,33 @@ fn endpoint_host_port(profile: &Profile) -> (String, u16) {
     }
 }
 
+fn import_command(store: &ProfileStore, path: &str) -> Result<String, String> {
+    let profiles = crate::config::import::import_path(Path::new(path))?;
+    let existing = store.list().map_err(|error| error.to_string())?;
+    let (mut added, mut skipped, mut failed) = (0_usize, 0_usize, 0_usize);
+    for profile in profiles {
+        if existing
+            .iter()
+            .any(|current| same_except_id(current, &profile))
+        {
+            skipped += 1;
+        } else if store.upsert(profile).is_ok() {
+            added += 1;
+        } else {
+            failed += 1;
+        }
+    }
+    Ok(format!(
+        "import: {added} added, {skipped} skipped, {failed} failed\n"
+    ))
+}
+
+fn same_except_id(current: &Profile, incoming: &Profile) -> bool {
+    let mut incoming = incoming.clone();
+    incoming.id = current.id;
+    current == &incoming
+}
+
 fn migrate_python(store: &ProfileStore, source: &std::path::Path) -> Result<String, String> {
     let text = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
     let document = import_python_profiles(&text).map_err(|error| error.to_string())?;
@@ -380,7 +408,7 @@ fn validate(store: &ProfileStore) -> Result<String, String> {
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | connect <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | connect <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | config-paths | info | doctor | migrate python [profiles.json]]"
 }
 
 #[cfg(test)]
