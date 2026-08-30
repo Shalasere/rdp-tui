@@ -8,8 +8,8 @@ use crate::freerdp::certificate;
 use crate::freerdp::discover::discover;
 use crate::model::fields;
 use crate::model::{
-    CertificatePolicy, ConnectionPlan, DeviceConfig, DisplayConfig, Endpoint, IdentityConfig,
-    Profile, ProfileId, Renderer, Route, SecurityConfig,
+    CertificatePolicy, ConnectionPlan, DeviceConfig, DisplayConfig, Endpoint, GraphicsMode,
+    IdentityConfig, NetworkProfile, Profile, ProfileId, Renderer, Route, SecurityConfig,
 };
 use crate::planner::plan;
 use crate::session::{connect_profile, test_profile};
@@ -434,12 +434,27 @@ fn set_command(
         "audio" => profile.devices.audio_playback = fields::parse_bool(new_value)?,
         "microphone" => profile.devices.microphone = fields::parse_bool(new_value)?,
         "printers" => profile.devices.printers = fields::parse_bool(new_value)?,
+        "graphics" => {
+            profile.display.graphics = GraphicsMode::from_token(new_value).ok_or_else(|| {
+                format!("unknown graphics mode '{new_value}' (use auto | rfx | avc420 | avc444)")
+            })?;
+        }
+        "admin-session" => profile.security.admin_session = fields::parse_bool(new_value)?,
+        "network" => {
+            profile.security.network_profile = NetworkProfile::from_token(new_value).ok_or_else(
+                || {
+                    format!(
+                        "unknown network profile '{new_value}' (use auto | modem | broadband-low | broadband-high | wan | lan)"
+                    )
+                },
+            )?;
+        }
         other => {
             return Err(format!(
                 "unknown field '{other}' (name | host | username | domain | fullscreen | \
                  renderer | resolution | route | multimon | span-monitors | smart-sizing | \
                  dynamic-resolution | scale | color-depth | clipboard | audio | microphone | \
-                 printers)"
+                 printers | graphics | admin-session | network)"
             ));
         }
     }

@@ -91,18 +91,21 @@ enum Field {
     Resolution,
     Scale,
     ColorDepth,
+    Graphics,
     DynamicResolution,
     Multimon,
     SpanMonitors,
     SmartSizing,
     Certificate,
+    AdminSession,
+    Network,
     Clipboard,
     Audio,
     Microphone,
     Printers,
 }
 
-const FIELDS: [Field; 19] = [
+const FIELDS: [Field; 22] = [
     Field::Name,
     Field::Host,
     Field::Username,
@@ -113,11 +116,14 @@ const FIELDS: [Field; 19] = [
     Field::Resolution,
     Field::Scale,
     Field::ColorDepth,
+    Field::Graphics,
     Field::DynamicResolution,
     Field::Multimon,
     Field::SpanMonitors,
     Field::SmartSizing,
     Field::Certificate,
+    Field::AdminSession,
+    Field::Network,
     Field::Clipboard,
     Field::Audio,
     Field::Microphone,
@@ -137,11 +143,14 @@ impl Field {
             Self::Resolution => "Resolution",
             Self::Scale => "Scale",
             Self::ColorDepth => "Color depth",
+            Self::Graphics => "Graphics",
             Self::DynamicResolution => "Dynamic res",
             Self::Multimon => "Multi-monitor",
             Self::SpanMonitors => "Span monitors",
             Self::SmartSizing => "Smart sizing",
             Self::Certificate => "Certificate",
+            Self::AdminSession => "Admin session",
+            Self::Network => "Network",
             Self::Clipboard => "Clipboard",
             Self::Audio => "Audio",
             Self::Microphone => "Microphone",
@@ -223,6 +232,7 @@ impl EditForm {
             Field::Resolution => fields::format_resolution(self.draft.display.resolution),
             Field::Scale => fields::format_scale(self.draft.display.scale_percent),
             Field::ColorDepth => fields::format_color_depth(self.draft.display.color_depth),
+            Field::Graphics => self.draft.display.graphics.token().to_owned(),
             Field::DynamicResolution => {
                 fields::format_bool(self.draft.display.dynamic_resolution).to_owned()
             }
@@ -230,6 +240,10 @@ impl EditForm {
             Field::SpanMonitors => fields::format_bool(self.draft.display.span_monitors).to_owned(),
             Field::SmartSizing => fields::format_bool(self.draft.display.smart_sizing).to_owned(),
             Field::Certificate => self.draft.security.certificate_policy.token().to_owned(),
+            Field::AdminSession => {
+                fields::format_bool(self.draft.security.admin_session).to_owned()
+            }
+            Field::Network => self.draft.security.network_profile.token().to_owned(),
             Field::Clipboard => fields::format_bool(self.draft.devices.clipboard).to_owned(),
             Field::Audio => fields::format_bool(self.draft.devices.audio_playback).to_owned(),
             Field::Microphone => fields::format_bool(self.draft.devices.microphone).to_owned(),
@@ -285,9 +299,15 @@ impl EditForm {
             Field::ColorDepth => {
                 display.color_depth = fields::cycle_color_depth(display.color_depth);
             }
+            Field::Graphics => display.graphics = display.graphics.cycled(),
             Field::Certificate => {
                 let policy = &mut self.draft.security.certificate_policy;
                 *policy = policy.cycled();
+            }
+            Field::AdminSession => toggle(&mut self.draft.security.admin_session),
+            Field::Network => {
+                let network = &mut self.draft.security.network_profile;
+                *network = network.cycled();
             }
             Field::Fullscreen => toggle(&mut display.fullscreen),
             Field::DynamicResolution => toggle(&mut display.dynamic_resolution),
@@ -1188,8 +1208,8 @@ mod tests {
     use super::{App, EditForm, FIELDS, Field, Mode, PromptAction};
     use crate::config::ConfigStore;
     use crate::model::{
-        CertificatePolicy, DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile,
-        ProfileId, Renderer, Route, SecurityConfig,
+        CertificatePolicy, DeviceConfig, DisplayConfig, Endpoint, GraphicsMode, IdentityConfig,
+        Profile, ProfileId, Renderer, Route, SecurityConfig,
     };
     use crate::profile_store::ProfileStore;
     use ratatui::Terminal;
@@ -1416,6 +1436,9 @@ mod tests {
         // Toggle multi-monitor on.
         go_to_field(&mut app, Field::Multimon);
         app.handle_editing(press(KeyCode::Char(' ')));
+        // Cycle the graphics pipeline (Auto -> Rfx).
+        go_to_field(&mut app, Field::Graphics);
+        app.handle_editing(press(KeyCode::Char(' ')));
         // Set the route by typing (clearing the default "direct" first).
         go_to_field(&mut app, Field::Route);
         app.handle_editing(press(KeyCode::Enter));
@@ -1427,6 +1450,7 @@ mod tests {
         let saved = store.get(id).unwrap().unwrap();
         assert_eq!(saved.security.certificate_policy, CertificatePolicy::System);
         assert!(saved.display.multimon);
+        assert_eq!(saved.display.graphics, GraphicsMode::Rfx);
         assert!(matches!(saved.route, Route::SshTunnel { .. }));
     }
 
