@@ -6,7 +6,7 @@
 //! here in `model`, which both are allowed to depend on. Everything here is pure
 //! and process-free — no argv, no terminal, no I/O.
 
-use crate::model::{CertificatePolicy, Endpoint, Renderer, Route};
+use crate::model::{CertificatePolicy, Endpoint, GraphicsMode, NetworkProfile, Renderer, Route};
 
 impl Renderer {
     /// Every renderer, in cycle order.
@@ -246,6 +246,97 @@ fn parse_optional<T: std::str::FromStr>(value: &str) -> Result<Option<T>, String
         .parse::<T>()
         .map(Some)
         .map_err(|_| format!("expected a number or 'none', got '{value}'"))
+}
+
+impl GraphicsMode {
+    /// Every graphics mode, in cycle order.
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Rfx, Self::Avc420, Self::Avc444];
+
+    /// The stable token used in the CLI and on screen.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Rfx => "rfx",
+            Self::Avc420 => "avc420",
+            Self::Avc444 => "avc444",
+        }
+    }
+
+    /// Parse a graphics-mode token.
+    #[must_use]
+    pub fn from_token(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "rfx" | "remotefx" => Some(Self::Rfx),
+            "avc420" | "h264" => Some(Self::Avc420),
+            "avc444" => Some(Self::Avc444),
+            _ => None,
+        }
+    }
+
+    /// The next mode, wrapping.
+    #[must_use]
+    pub const fn cycled(self) -> Self {
+        match self {
+            Self::Auto => Self::Rfx,
+            Self::Rfx => Self::Avc420,
+            Self::Avc420 => Self::Avc444,
+            Self::Avc444 => Self::Auto,
+        }
+    }
+}
+
+impl NetworkProfile {
+    /// Every network profile, in cycle order.
+    pub const ALL: [Self; 6] = [
+        Self::Auto,
+        Self::Modem,
+        Self::BroadbandLow,
+        Self::BroadbandHigh,
+        Self::Wan,
+        Self::Lan,
+    ];
+
+    /// The stable token, matching `FreeRDP`'s `/network` values.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Modem => "modem",
+            Self::BroadbandLow => "broadband-low",
+            Self::BroadbandHigh => "broadband-high",
+            Self::Wan => "wan",
+            Self::Lan => "lan",
+        }
+    }
+
+    /// Parse a network-profile token.
+    #[must_use]
+    pub fn from_token(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "modem" => Some(Self::Modem),
+            "broadband-low" => Some(Self::BroadbandLow),
+            "broadband-high" | "broadband" => Some(Self::BroadbandHigh),
+            "wan" => Some(Self::Wan),
+            "lan" => Some(Self::Lan),
+            _ => None,
+        }
+    }
+
+    /// The next profile, wrapping.
+    #[must_use]
+    pub const fn cycled(self) -> Self {
+        match self {
+            Self::Auto => Self::Modem,
+            Self::Modem => Self::BroadbandLow,
+            Self::BroadbandLow => Self::BroadbandHigh,
+            Self::BroadbandHigh => Self::Wan,
+            Self::Wan => Self::Lan,
+            Self::Lan => Self::Auto,
+        }
+    }
 }
 
 #[cfg(test)]

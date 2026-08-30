@@ -19,8 +19,8 @@ pub use id::{CredentialKey, IdParseError, ProfileId, SessionId};
 pub use plan::{ConnectionPlan, FreeRdpClient};
 pub use prepared::{PreparedConnection, RouteHandle, TunnelHandle};
 pub use profile::{
-    AdvancedOverrides, CertificatePolicy, DeviceConfig, DisplayConfig, IdentityConfig,
-    NetworkProfile, Profile, Renderer, SecurityConfig,
+    AdvancedOverrides, CertificatePolicy, DeviceConfig, DisplayConfig, GraphicsMode,
+    IdentityConfig, NetworkProfile, Profile, Renderer, SecurityConfig,
 };
 pub use route::{PlannedRoute, Route};
 pub use session::{AttemptState, SessionResult, SessionState};

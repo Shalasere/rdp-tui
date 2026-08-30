@@ -1,4 +1,6 @@
-use crate::model::{CertificatePolicy, NetworkProfile, PlannedRoute, PreparedConnection, Renderer};
+use crate::model::{
+    CertificatePolicy, GraphicsMode, NetworkProfile, PlannedRoute, PreparedConnection, Renderer,
+};
 use std::ffi::OsString;
 use std::path::PathBuf;
 /// Build `FreeRDP` argv only; credentials are deliberately not rendered into argv.
@@ -29,6 +31,9 @@ pub fn build_command(
     }
     if plan.devices.microphone {
         args.push("/microphone".into());
+    }
+    if plan.devices.printers {
+        args.push("/printer".into());
     }
     for (index, folder) in plan.devices.shared_folders.iter().enumerate() {
         args.push(format!("/drive:rdp-tui-{},{}", index + 1, folder.display()).into());
@@ -68,6 +73,12 @@ pub fn build_command(
     }
     if let Some(depth) = plan.display.color_depth {
         args.push(format!("/bpp:{depth}").into());
+    }
+    match plan.display.graphics {
+        GraphicsMode::Auto => {}
+        GraphicsMode::Rfx => args.push("+rfx".into()),
+        GraphicsMode::Avc420 => args.push("/gfx:AVC420".into()),
+        GraphicsMode::Avc444 => args.push("/gfx:AVC444".into()),
     }
     if matches!(plan.client.renderer, Renderer::WaylandSdl) {
         // Leave compositor shortcuts and touchpad gestures with Hyprland.

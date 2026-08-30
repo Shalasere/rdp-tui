@@ -98,6 +98,7 @@ fn convert(index: usize, source: PythonProfile) -> Result<Profile, StoreError> {
         smart_sizing: source.smart_sizing,
         scale_percent: (source.scale != 0).then_some(source.scale),
         color_depth: (source.color_depth != 0).then_some(source.color_depth),
+        graphics: crate::model::GraphicsMode::Auto,
         renderer: if source.renderer == "x11" {
             Renderer::X11
         } else {

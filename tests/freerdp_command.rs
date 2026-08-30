@@ -70,6 +70,9 @@ fn command_renders_supported_profile_settings() {
     plan.devices.microphone = true;
     plan.devices.shared_folders = vec![PathBuf::from("/srv/shared")];
     plan.security.admin_session = true;
+    plan.devices.printers = true;
+    plan.display.graphics = rdp_tui::model::GraphicsMode::Avc444;
+    plan.security.network_profile = rdp_tui::model::NetworkProfile::Wan;
 
     let prepared = prepare(&plan).unwrap();
     let (_, args, _) = build_command(&prepared);
@@ -88,6 +91,9 @@ fn command_renders_supported_profile_settings() {
         "/smart-sizing",
         "/scale:140",
         "/bpp:32",
+        "/printer",
+        "/gfx:AVC444",
+        "/network:wan",
     ] {
         assert!(
             args.contains(&expected.into()),

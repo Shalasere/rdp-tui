@@ -260,6 +260,7 @@ impl Imported {
                 smart_sizing: self.smart_sizing,
                 scale_percent: None,
                 color_depth: self.color_depth,
+                graphics: crate::model::GraphicsMode::Auto,
             },
             devices: DeviceConfig {
                 clipboard: self.clipboard,

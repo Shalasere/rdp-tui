@@ -36,6 +36,7 @@ pub struct DisplayConfig {
     pub smart_sizing: bool,
     pub scale_percent: Option<u16>,
     pub color_depth: Option<u8>,
+    pub graphics: GraphicsMode,
 }
 
 impl Default for DisplayConfig {
@@ -50,6 +51,7 @@ impl Default for DisplayConfig {
             smart_sizing: false,
             scale_percent: None,
             color_depth: None,
+            graphics: GraphicsMode::Auto,
         }
     }
 }
@@ -109,6 +111,18 @@ pub enum Renderer {
     #[default]
     WaylandSdl,
     X11,
+}
+
+/// The RDP graphics pipeline to request. Auto lets `FreeRDP` negotiate the best
+/// available; the rest force a specific encoder.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphicsMode {
+    #[default]
+    Auto,
+    Rfx,
+    Avc420,
+    Avc444,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
