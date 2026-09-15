@@ -7,8 +7,11 @@
 //! exit status is unreliable (a UPN username can trigger a Kerberos abort), so
 //! the outcome is read from the logged connection result, not the status.
 
-use crate::model::{Endpoint, IdentityConfig};
-use rustix::fs::{MemfdFlags, memfd_create};
+use crate::model::{Endpoint, IdentityConfig, SessionId};
+use crate::runtime::process::{LaunchMode, spawn_child};
+use crate::runtime::registry::ChildKind;
+use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
+use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret as _, SecretString};
 use std::fmt::Write as _;
 use std::fs::File;
@@ -16,6 +19,10 @@ use std::io::{Seek as _, Write as _};
 use std::os::fd::AsRawFd as _;
 use std::path::Path;
 use std::process::Command;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The result of a `FreeRDP` auth-only attempt.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -23,6 +30,7 @@ pub enum AuthOutcome {
     Authenticated,
     LogonFailure,
     Unreachable,
+    Indeterminate,
 }
 
 /// Run `FreeRDP` auth-only against `target` and classify the logged result. The
@@ -38,7 +46,7 @@ pub fn authenticate(
     identity: &IdentityConfig,
     password: Option<&SecretString>,
 ) -> std::io::Result<AuthOutcome> {
-    let mut arguments = format!("/v:{target}\n");
+    let mut arguments = Zeroizing::new(format!("/v:{target}\n"));
     if !identity.username.is_empty() {
         let _ = writeln!(arguments, "/u:{}", identity.username);
     }
@@ -50,25 +58,53 @@ pub fn authenticate(
 
     // /args-from must be the sole argument, so the password (in /p:) lives only
     // in this inherited memfd, never in the process argument list.
-    let descriptor = memfd_create("rdp-tui-authargs", MemfdFlags::empty())?;
+    let descriptor = memfd_create("rdp-tui-authargs", MemfdFlags::ALLOW_SEALING)?;
     let mut file = File::from(descriptor);
     file.write_all(arguments.as_bytes())?;
     file.rewind()?;
+    fcntl_add_seals(
+        &file,
+        SealFlags::SEAL | SealFlags::SHRINK | SealFlags::GROW | SealFlags::WRITE,
+    )?;
     let raw = file.as_raw_fd();
 
-    let output = Command::new(executable)
+    let stdout = tempfile::NamedTempFile::new()?;
+    let stderr = tempfile::NamedTempFile::new()?;
+    let mut command = Command::new(executable);
+    command
         .arg(format!("/args-from:fd:{raw}"))
-        .output()?;
-    drop(file); // hold the memfd open across the spawn, then release it
+        .stdout(Stdio::from(stdout.reopen()?))
+        .stderr(Stdio::from(stderr.reopen()?));
+    let mut child = spawn_child(
+        &mut command,
+        ChildKind::FreeRdp,
+        SessionId::generate(),
+        LaunchMode::OneShot,
+    )?;
+    let deadline = Instant::now() + AUTH_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.terminate_if_owned()?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "FreeRDP auth-only test timed out",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    drop(file); // hold the sealed memfd open across the spawn, then release it
     let text = format!(
         "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&std::fs::read(stdout.path())?),
+        String::from_utf8_lossy(&std::fs::read(stderr.path())?)
     );
-    Ok(classify(&text))
+    Ok(classify(&text, status.success()))
 }
 
-fn classify(output: &str) -> AuthOutcome {
+fn classify(output: &str, exited_successfully: bool) -> AuthOutcome {
     if output.contains("LOGON_FAILURE") {
         // The host reached the auth stage and rejected the credentials.
         AuthOutcome::LogonFailure
@@ -79,8 +115,10 @@ fn classify(output: &str) -> AuthOutcome {
     } else if output.contains("ERRCONNECT") {
         // Failed before the auth stage — DNS, TCP, or pre-connect.
         AuthOutcome::Unreachable
-    } else {
+    } else if exited_successfully && output.contains("Authentication only") {
         AuthOutcome::Authenticated
+    } else {
+        AuthOutcome::Indeterminate
     }
 }
 
@@ -91,7 +129,10 @@ mod tests {
     #[test]
     fn classifies_a_logon_failure() {
         assert_eq!(
-            classify("[ERROR] nla_recv_pdu ERRCONNECT_LOGON_FAILURE [0x00020014]"),
+            classify(
+                "[ERROR] nla_recv_pdu ERRCONNECT_LOGON_FAILURE [0x00020014]",
+                false,
+            ),
             AuthOutcome::LogonFailure
         );
     }
@@ -99,7 +140,7 @@ mod tests {
     #[test]
     fn classifies_an_unreachable_target() {
         assert_eq!(
-            classify("ERRCONNECT_CONNECT_FAILED could not reach host"),
+            classify("ERRCONNECT_CONNECT_FAILED could not reach host", false),
             AuthOutcome::Unreachable
         );
     }
@@ -109,7 +150,8 @@ mod tests {
         // Auth-only tears the RDP connect down once NLA succeeds.
         assert_eq!(
             classify(
-                "kerberos noise\nAuthentication only, exit status 1\nERRCONNECT_CONNECT_CANCELLED [0x0002000B]"
+                "kerberos noise\nAuthentication only, exit status 1\nERRCONNECT_CONNECT_CANCELLED [0x0002000B]",
+                false,
             ),
             AuthOutcome::Authenticated
         );
@@ -118,8 +160,21 @@ mod tests {
     #[test]
     fn classifies_a_clean_authentication() {
         assert_eq!(
-            classify("Authentication only. Don't connect to X."),
+            classify("Authentication only. Don't connect to X.", true),
             AuthOutcome::Authenticated
+        );
+    }
+
+    #[test]
+    fn unknown_or_empty_output_is_indeterminate() {
+        assert_eq!(classify("", true), AuthOutcome::Indeterminate);
+        assert_eq!(
+            classify("process aborted unexpectedly", false),
+            AuthOutcome::Indeterminate
+        );
+        assert_eq!(
+            classify("Authentication only. Don't connect to X.", false),
+            AuthOutcome::Indeterminate
         );
     }
 }

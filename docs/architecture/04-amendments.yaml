@@ -38,12 +38,17 @@ resolved_gaps:
 module_graph_amendments:
   constraint: merged graph must not contain any edge declared in 00-manifest.yaml forbidden_edges
   add_module:
-    session: [model, planner, credentials, preflight, freerdp, ssh, config, runtime]
+    session: [model, planner, credentials, preflight, freerdp, ssh, config, runtime, paths, diagnostics]
+    operations: [model, credentials, freerdp, profile_store, config, paths]
+    paths: []
+    diagnostics: []
   replace_dependencies:
-    credentials: [model, secret, config]
-    freerdp: [model, runtime, credentials]
-    tui: [model, session, planner, credentials, preflight, freerdp, ssh, secret, config]
-    cli: [model, session, planner, credentials, preflight, freerdp, ssh, secret, config]
+    profile_store: [model, config]
+    config: [model, paths]
+    credentials: [model, secret]
+    freerdp: [model, runtime, credentials, paths]
+    tui: [model, session, credentials, freerdp, config, profile_store, operations, paths, diagnostics]
+    cli: [model, session, planner, credentials, freerdp, secret, config, operations, paths]
   add_files:
     src/model/id.rs: ProfileId, SessionId, and CredentialKey fixed-width newtypes
     src/model/validation.rs: pure semantic profile and advanced-override validation
@@ -55,6 +60,10 @@ module_graph_amendments:
     src/config/contract.rs: contract schema and cross-reference validator used by tests/CI
     src/config/error.rs: typed persistence and schema errors
     src/config/schema.rs: versioned config.toml and profiles.toml parsing
+    src/operations.rs: transactional workflows shared by the TUI and CLI
+    src/paths.rs: centralized XDG config, state, and runtime path resolution
+    src/diagnostics.rs: opt-in owner-only diagnostic logging
+    src/tui/app/view.rs: pure TUI rendering separated from controller state transitions
 
 session_supervisor:
   applies_to: connect_only

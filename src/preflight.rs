@@ -3,8 +3,93 @@
 use crate::model::{ConnectionFailure, ConnectionPlan, PlannedRoute, PreparedConnection};
 use crate::runtime::process::LaunchMode;
 use crate::ssh::tunnel::establish;
-use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::fmt;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant};
+
+/// A failed TCP reachability attempt, retained for user-facing diagnostics.
+#[derive(Debug)]
+pub struct SocketAttempt {
+    address: SocketAddr,
+    error: std::io::Error,
+}
+
+impl fmt::Display for SocketAttempt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.address, self.error)
+    }
+}
+
+/// A reachability failure with the endpoint and kernel errors that caused it.
+#[derive(Debug)]
+pub struct ReachabilityError {
+    failure: ConnectionFailure,
+    endpoint: crate::model::Endpoint,
+    detail: ReachabilityDetail,
+}
+
+#[derive(Debug)]
+enum ReachabilityDetail {
+    Resolution(std::io::Error),
+    Attempts(Vec<SocketAttempt>),
+}
+
+impl ReachabilityError {
+    /// The stable, coarse failure category used by history and callers.
+    #[must_use]
+    pub const fn failure(&self) -> ConnectionFailure {
+        self.failure
+    }
+}
+
+impl fmt::Display for ReachabilityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} ({:?}): ", self.endpoint, self.failure)?;
+        match &self.detail {
+            ReachabilityDetail::Resolution(error) => {
+                write!(formatter, "DNS lookup failed: {error}")
+            }
+            ReachabilityDetail::Attempts(attempts) if attempts.is_empty() => {
+                formatter.write_str("no socket addresses were returned")
+            }
+            ReachabilityDetail::Attempts(attempts) => {
+                for (index, attempt) in attempts.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str("; ")?;
+                    }
+                    attempt.fmt(formatter)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReachabilityError {}
+
+/// A preflight failure that preserves both a stable category and diagnostics.
+#[derive(Debug)]
+pub enum PreflightError {
+    Preparation(ConnectionFailure),
+    Reachability(ReachabilityError),
+}
+
+impl From<ConnectionFailure> for PreflightError {
+    fn from(failure: ConnectionFailure) -> Self {
+        Self::Preparation(failure)
+    }
+}
+
+impl fmt::Display for PreflightError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Preparation(failure) => write!(formatter, "{failure:?}"),
+            Self::Reachability(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for PreflightError {}
 
 /// Check whether a TCP endpoint can be resolved and reached within `timeout`.
 ///
@@ -13,32 +98,64 @@ use std::time::Duration;
 ///
 /// # Errors
 ///
-/// Returns [`ConnectionFailure::Dns`] when resolution fails,
-/// [`ConnectionFailure::Timeout`] when every attempted address times out, and
-/// [`ConnectionFailure::Network`] for an empty resolution or other connection
-/// failure.
+/// Returns a [`ReachabilityError`] with a stable failure category and every
+/// failed socket attempt. This prevents caller-facing diagnostics from losing
+/// actionable kernel errors such as "Connection refused" or "No route to host".
 pub fn check_tcp(
     endpoint: &crate::model::Endpoint,
     timeout: Duration,
-) -> Result<(), ConnectionFailure> {
-    let addresses = endpoint
-        .to_string()
-        .to_socket_addrs()
-        .map_err(|_| ConnectionFailure::Dns)?;
-    let mut attempted = false;
+) -> Result<(), ReachabilityError> {
+    crate::diagnostics::log(format_args!(
+        "preflight tcp start endpoint={endpoint} timeout_ms={}",
+        timeout.as_millis()
+    ));
+    let addresses = match endpoint.to_string().to_socket_addrs() {
+        Ok(addresses) => addresses,
+        Err(source) => {
+            let error = ReachabilityError {
+                failure: ConnectionFailure::Dns,
+                endpoint: endpoint.clone(),
+                detail: ReachabilityDetail::Resolution(source),
+            };
+            crate::diagnostics::log(format_args!("preflight tcp failed: {error}"));
+            return Err(error);
+        }
+    };
+    let mut attempts = Vec::new();
     let mut timed_out = false;
+    let deadline = Instant::now() + timeout;
     for address in addresses {
-        attempted = true;
-        match TcpStream::connect_timeout(&address, timeout) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            timed_out = true;
+            attempts.push(SocketAttempt {
+                address,
+                error: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "overall reachability deadline expired",
+                ),
+            });
+            break;
+        }
+        match TcpStream::connect_timeout(&address, remaining) {
             Ok(_) => return Ok(()),
-            Err(error) => timed_out |= error.kind() == std::io::ErrorKind::TimedOut,
+            Err(error) => {
+                timed_out |= error.kind() == std::io::ErrorKind::TimedOut;
+                attempts.push(SocketAttempt { address, error });
+            }
         }
     }
-    if timed_out && attempted {
-        Err(ConnectionFailure::Timeout)
-    } else {
-        Err(ConnectionFailure::Network)
-    }
+    let error = ReachabilityError {
+        failure: if timed_out && !attempts.is_empty() {
+            ConnectionFailure::Timeout
+        } else {
+            ConnectionFailure::Network
+        },
+        endpoint: endpoint.clone(),
+        detail: ReachabilityDetail::Attempts(attempts),
+    };
+    crate::diagnostics::log(format_args!("preflight tcp failed: {error}"));
+    Err(error)
 }
 
 /// Prepare a connection and verify the endpoint reachable from this host.
@@ -54,14 +171,14 @@ pub fn check_tcp(
 pub fn preflight(
     plan: &ConnectionPlan,
     timeout: Duration,
-) -> Result<PreparedConnection, ConnectionFailure> {
+) -> Result<PreparedConnection, PreflightError> {
     let prepared = prepare(plan)?;
     let endpoint = match &plan.route {
         PlannedRoute::Direct => &prepared.effective_endpoint,
-        PlannedRoute::RdGateway { gateway } => gateway,
+        PlannedRoute::RdGateway { gateway, .. } => gateway,
         PlannedRoute::SshTunnel { .. } => unreachable!("prepare rejects unsupported SSH routes"),
     };
-    check_tcp(endpoint, timeout)?;
+    check_tcp(endpoint, timeout).map_err(PreflightError::Reachability)?;
     Ok(prepared)
 }
 
@@ -94,12 +211,12 @@ pub fn prepare(plan: &ConnectionPlan) -> Result<PreparedConnection, ConnectionFa
 pub fn verify_prepared(
     prepared: &PreparedConnection,
     timeout: Duration,
-) -> Result<(), ConnectionFailure> {
+) -> Result<(), PreflightError> {
     let endpoint = match &prepared.plan.route {
         PlannedRoute::Direct | PlannedRoute::SshTunnel { .. } => &prepared.effective_endpoint,
-        PlannedRoute::RdGateway { gateway } => gateway,
+        PlannedRoute::RdGateway { gateway, .. } => gateway,
     };
-    check_tcp(endpoint, timeout)
+    check_tcp(endpoint, timeout).map_err(PreflightError::Reachability)
 }
 
 /// Prepare a route for one session, retaining an SSH tunnel when required.

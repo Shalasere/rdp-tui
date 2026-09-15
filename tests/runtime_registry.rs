@@ -5,6 +5,7 @@ use rdp_tui::runtime::registry::{
     scan_for_orphans, still_matches,
 };
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 fn session() -> SessionId {
     "550e8400-e29b-41d4-a716-446655440000"
@@ -54,4 +55,29 @@ fn a_reaped_registered_child_scans_as_stale() {
         .expect("registered identity appears in the scan");
     assert_eq!(entry.observed_state, ProcessObservedState::Stale);
     let _ = deregister(identity.pid);
+}
+
+#[test]
+fn a_zombie_is_not_reported_as_running() {
+    let mut child = Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let state = stat.rsplit_once(") ").unwrap().1.split_whitespace().next();
+        if state == Some("Z") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child {pid} did not exit in time"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(
+        observe(pid, ChildKind::Supervisor, session()).is_err(),
+        "a zombie has exited and must not be reported as live"
+    );
+    child.wait().unwrap();
 }

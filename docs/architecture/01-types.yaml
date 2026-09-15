@@ -25,12 +25,12 @@ model.route:
   Route:
     enum:
       - Direct
-      - "RdGateway { gateway: Endpoint, credential: Option<CredentialRef> }"
+      - "RdGateway { gateway: Endpoint, username: String, domain: String, credential: Option<CredentialRef> }"
       - "SshTunnel { jump_host: String }"
   PlannedRoute:
     enum:
       - Direct
-      - "RdGateway { gateway: Endpoint }"
+      - "RdGateway { gateway: Endpoint, username: String, domain: String }"
       - "SshTunnel { jump_host: String, target: Endpoint }"
 
 model.plan:

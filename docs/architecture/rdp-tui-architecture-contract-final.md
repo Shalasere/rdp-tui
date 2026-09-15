@@ -91,7 +91,7 @@ Two module notes worth stating explicitly, since they resolve ambiguity a smalle
 
 ## 4. Dependency Rules
 
-`model/` depends on nothing but the standard library and serialization traits — no Ratatui, Crossterm, FreeRDP command syntax, subprocess handles, D-Bus, XDG paths, or `runtime` types. `tui/` and `cli/` both depend on `model`, `planner`, `credentials`, `preflight`, `freerdp`, `ssh` directly — there is no intermediate "application service" layer, since one would do nothing but forward calls. `freerdp/` and `ssh/` depend on `model` and `runtime`. Forbidden: `model → tui`, `model → freerdp` argv implementation, `model → runtime`, or core logic duplicated between TUI and CLI. Do not add repository interfaces, DI containers, or generic trait hierarchies without a demonstrated concrete need.
+`model/` depends on nothing but the standard library and serialization traits — no Ratatui, Crossterm, FreeRDP command syntax, subprocess handles, D-Bus, XDG paths, or `runtime` types. `tui/` and `cli/` share state-changing application workflows through the narrow `operations` module; connection orchestration remains in `session`. `freerdp/` and `ssh/` depend on `model` and `runtime`. Forbidden: `model → tui`, `model → freerdp` argv implementation, `model → runtime`, or core logic duplicated between TUI and CLI. Do not add repository interfaces, DI containers, or generic trait hierarchies without a demonstrated concrete need.
 
 ## 5. Domain Types
 
@@ -114,7 +114,7 @@ struct Endpoint { host: Host, port: u16 }
 
 enum Route {
     Direct,
-    RdGateway { gateway: Endpoint, credential: Option<CredentialRef> },
+    RdGateway { gateway: Endpoint, username: String, domain: String, credential: Option<CredentialRef> },
     SshTunnel { jump_host: String },   // stays compatible with ~/.ssh/config syntax
 }
 ```
@@ -137,7 +137,7 @@ struct ConnectionPlan {
 
 enum PlannedRoute {
     Direct,
-    RdGateway { gateway: Endpoint },
+    RdGateway { gateway: Endpoint, username: String, domain: String },
     SshTunnel { jump_host: String, target: Endpoint },
 }
 ```

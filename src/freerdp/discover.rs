@@ -41,7 +41,7 @@ pub fn discover(renderer: Renderer) -> Result<DiscoveredFreeRdp, String> {
         gateway: true,
         multimon: true,
         dynamic_resolution: true,
-        auth_only: if version.major >= 3 {
+        auth_only: if version.major == 3 {
             AuthOnlySupport::Validated
         } else {
             AuthOnlySupport::Unvalidated

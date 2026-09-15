@@ -9,29 +9,80 @@ use crate::model::{
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Import every profile from a path: a Remmina directory, a `.remmina` file, or
-/// a Microsoft `.rdp` file. (Python JSON backups load via `migrate python`.)
+/// Parsed profiles plus per-file failures from a batch import.
+#[derive(Debug, Default)]
+pub struct ImportBatch {
+    pub profiles: Vec<Profile>,
+    pub failures: Vec<String>,
+}
+
+/// Import every credential-free profile from a supported file or directory.
 ///
 /// # Errors
 ///
 /// Returns a message when the path cannot be read or its format is unsupported.
 pub fn import_path(path: &Path) -> Result<Vec<Profile>, String> {
+    let batch = import_path_report(path)?;
+    if batch.profiles.is_empty() && !batch.failures.is_empty() {
+        return Err(batch.failures.join("; "));
+    }
+    Ok(batch.profiles)
+}
+
+/// Import a path while retaining non-fatal per-file failures for reporting.
+///
+/// # Errors
+///
+/// Returns a message when the path cannot be read, parsed, or identified.
+pub fn import_path_report(path: &Path) -> Result<ImportBatch, String> {
     if path.is_dir() {
         return import_directory(path);
     }
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let name = file_stem(path);
     match path.extension().and_then(std::ffi::OsStr::to_str) {
-        Some("remmina") => Ok(vec![import_remmina(&text, &name)?]),
-        Some("rdp") => Ok(vec![import_rdp(&text, &name)?]),
+        Some("remmina") => Ok(ImportBatch {
+            profiles: vec![import_remmina(&text, &name)?],
+            failures: Vec::new(),
+        }),
+        Some("rdp") => Ok(ImportBatch {
+            profiles: vec![import_rdp(&text, &name)?],
+            failures: Vec::new(),
+        }),
+        Some("toml") => Ok(ImportBatch {
+            profiles: without_credentials(
+                super::parse_profiles_document(&text)
+                    .map_err(|error| error.to_string())?
+                    .profiles,
+            ),
+            failures: Vec::new(),
+        }),
+        Some("json") => Ok(ImportBatch {
+            profiles: without_credentials(
+                super::migrate::import_python_profiles(&text)
+                    .map_err(|error| error.to_string())?
+                    .profiles,
+            ),
+            failures: Vec::new(),
+        }),
         Some(other) => Err(format!(
-            "cannot import a .{other} file; use .remmina, .rdp, a directory, or `migrate python`"
+            "cannot import a .{other} file; use .remmina, .rdp, .toml, .json, or a directory"
         )),
         None => Err("cannot determine the import format from the path".into()),
     }
 }
 
-fn import_directory(path: &Path) -> Result<Vec<Profile>, String> {
+fn without_credentials(mut profiles: Vec<Profile>) -> Vec<Profile> {
+    for profile in &mut profiles {
+        profile.credential = None;
+        if let Route::RdGateway { credential, .. } = &mut profile.route {
+            *credential = None;
+        }
+    }
+    profiles
+}
+
+fn import_directory(path: &Path) -> Result<ImportBatch, String> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(path)
         .map_err(|error| error.to_string())?
         .filter_map(Result::ok)
@@ -42,15 +93,17 @@ fn import_directory(path: &Path) -> Result<Vec<Profile>, String> {
     if files.is_empty() {
         return Err("the directory contains no .remmina profiles".into());
     }
-    let mut profiles = Vec::new();
+    let mut batch = ImportBatch::default();
     for file in files {
-        let text = std::fs::read_to_string(&file).map_err(|error| error.to_string())?;
-        // A non-RDP Remmina profile is skipped, not fatal to the batch.
-        if let Ok(profile) = import_remmina(&text, &file_stem(&file)) {
-            profiles.push(profile);
+        match std::fs::read_to_string(&file)
+            .map_err(|error| error.to_string())
+            .and_then(|text| import_remmina(&text, &file_stem(&file)))
+        {
+            Ok(profile) => batch.profiles.push(profile),
+            Err(error) => batch.failures.push(format!("{}: {error}", file.display())),
         }
     }
-    Ok(profiles)
+    Ok(batch)
 }
 
 /// Import a single Remmina `.remmina` profile.
@@ -122,6 +175,8 @@ pub fn import_remmina(text: &str, fallback_name: &str) -> Result<Profile, String
             .get("gateway_server")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
+        gateway_user: get(&ini, "gateway_username").to_string(),
+        gateway_domain: get(&ini, "gateway_domain").to_string(),
     }
     .into_profile()
 }
@@ -172,6 +227,8 @@ pub fn import_rdp(text: &str, fallback_name: &str) -> Result<Profile, String> {
         certificate_policy: CertificatePolicy::Tofu,
         network_profile: NetworkProfile::Auto,
         gateway: None,
+        gateway_user: String::new(),
+        gateway_domain: String::new(),
     }
     .into_profile()
 }
@@ -230,6 +287,8 @@ struct Imported {
     certificate_policy: CertificatePolicy,
     network_profile: NetworkProfile,
     gateway: Option<String>,
+    gateway_user: String,
+    gateway_domain: String,
 }
 
 impl Imported {
@@ -237,6 +296,8 @@ impl Imported {
         let route = match self.gateway {
             Some(gateway) => Route::RdGateway {
                 gateway: parse_endpoint(&gateway, 443)?,
+                username: self.gateway_user,
+                domain: self.gateway_domain,
                 credential: None,
             },
             None => Route::Direct,
@@ -378,7 +439,7 @@ fn file_stem(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{export_rdp, import_path, import_rdp, import_remmina};
+    use super::{export_rdp, import_path, import_path_report, import_rdp, import_remmina};
     use tempfile::TempDir;
 
     #[test]
@@ -443,6 +504,36 @@ mod tests {
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].name, "Alpha");
         assert_eq!(profiles[1].name, "Beta");
+
+        let report = import_path_report(dir.path()).unwrap();
+        assert_eq!(report.profiles.len(), 2);
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].contains("only Remmina RDP"));
+    }
+
+    #[test]
+    fn imports_native_toml_and_python_json_backups() {
+        let directory = TempDir::new().unwrap();
+        let profile = import_remmina(
+            "[remmina]\nname=Native\nprotocol=RDP\nserver=10.0.0.8\n",
+            "fallback",
+        )
+        .unwrap();
+        let native = crate::config::ProfilesDocument {
+            version: 1,
+            profiles: vec![profile],
+        };
+        let toml_path = directory.path().join("profiles.toml");
+        std::fs::write(&toml_path, toml::to_string(&native).unwrap()).unwrap();
+        assert_eq!(import_path(&toml_path).unwrap()[0].name, "Native");
+
+        let json_path = directory.path().join("profiles.json");
+        std::fs::write(
+            &json_path,
+            r#"[{"id":"550e8400-e29b-41d4-a716-446655440000","name":"Legacy","host":"10.0.0.9"}]"#,
+        )
+        .unwrap();
+        assert_eq!(import_path(&json_path).unwrap()[0].name, "Legacy");
     }
 
     #[test]

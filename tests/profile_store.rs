@@ -40,3 +40,25 @@ fn upsert_get_list_and_remove_use_the_durable_store() {
     assert!(store.remove(id).unwrap());
     assert!(!store.remove(id).unwrap());
 }
+
+#[test]
+fn batch_merge_distinguishes_updates_duplicates_and_additions() {
+    let temporary = TempDir::new().unwrap();
+    let store = ProfileStore::new(ConfigStore::new(temporary.path()));
+    let existing = profile("550e8400-e29b-41d4-a716-446655440000", "Anima");
+    store.upsert(existing.clone()).unwrap();
+
+    let unchanged = existing.clone();
+    let mut updated = existing;
+    updated.name = "Anima updated".into();
+    let duplicate = profile("650e8400-e29b-41d4-a716-446655440000", "Anima updated");
+    let added = profile("750e8400-e29b-41d4-a716-446655440000", "Compono");
+    let counts = store
+        .merge(vec![unchanged, updated, duplicate, added])
+        .unwrap();
+
+    assert_eq!(counts.updated, 1);
+    assert_eq!(counts.skipped, 2);
+    assert_eq!(counts.added, 1);
+    assert_eq!(store.list().unwrap().len(), 2);
+}

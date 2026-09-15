@@ -25,6 +25,8 @@ pub fn plan(
         Route::Direct => (PlannedRoute::Direct, None),
         Route::RdGateway {
             gateway,
+            username,
+            domain,
             credential,
         } => {
             if !caps.gateway {
@@ -33,6 +35,8 @@ pub fn plan(
             (
                 PlannedRoute::RdGateway {
                     gateway: gateway.clone(),
+                    username: username.clone(),
+                    domain: domain.clone(),
                 },
                 *credential,
             )

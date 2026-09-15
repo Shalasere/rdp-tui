@@ -52,6 +52,10 @@ struct PythonProfile {
     #[serde(default)]
     gateway_host: String,
     #[serde(default)]
+    gateway_user: String,
+    #[serde(default)]
+    gateway_domain: String,
+    #[serde(default)]
     ssh_tunnel_host: String,
     #[serde(default)]
     extra_options: String,
@@ -115,10 +119,9 @@ fn convert(index: usize, source: PythonProfile) -> Result<Profile, StoreError> {
         }
     } else if !source.gateway_host.is_empty() {
         Route::RdGateway {
-            gateway: source
-                .gateway_host
-                .parse::<Endpoint>()
-                .map_err(|error| schema(index, "gateway_host", error.to_string()))?,
+            gateway: parse_gateway(index, &source.gateway_host)?,
+            username: source.gateway_user,
+            domain: source.gateway_domain,
             credential: None,
         }
     } else {
@@ -176,6 +179,17 @@ fn convert(index: usize, source: PythonProfile) -> Result<Profile, StoreError> {
         security,
         credential: None,
     })
+}
+
+fn parse_gateway(index: usize, value: &str) -> Result<Endpoint, StoreError> {
+    let candidate = if value.contains(':') {
+        value.to_string()
+    } else {
+        format!("{value}:443")
+    };
+    candidate
+        .parse::<Endpoint>()
+        .map_err(|error| schema(index, "gateway_host", error.to_string()))
 }
 fn parse_resolution(index: usize, value: &str) -> Result<Option<(u16, u16)>, StoreError> {
     if value.is_empty() {

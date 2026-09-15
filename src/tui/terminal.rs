@@ -24,8 +24,12 @@ impl TerminalGuard {
     /// Returns an I/O error if the terminal cannot be reconfigured.
     pub fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
-        Ok(Self { restored: false })
+        let mut guard = Self { restored: false };
+        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen) {
+            guard.restore();
+            return Err(error);
+        }
+        Ok(guard)
     }
 
     /// Restore the terminal to its normal state. Safe to call more than once.

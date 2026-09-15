@@ -60,6 +60,12 @@ pub fn observe(
         .rsplit_once(") ")
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid proc stat"))?
         .1;
+    if tail.split_whitespace().next() == Some("Z") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "process has exited and is awaiting reaping",
+        ));
+    }
     let start_time_ticks = tail
         .split_whitespace()
         .nth(19)

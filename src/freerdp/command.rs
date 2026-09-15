@@ -3,6 +3,9 @@ use crate::model::{
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
+
+const STABLE_MICROPHONE_REDIRECTION: &str = "/microphone:sys:pulse,format:1,rate:48000,channel:1";
+
 /// Build `FreeRDP` argv only; credentials are deliberately not rendered into argv.
 #[must_use]
 pub fn build_command(
@@ -30,7 +33,9 @@ pub fn build_command(
         args.push("/sound".into());
     }
     if plan.devices.microphone {
-        args.push("/microphone".into());
+        // Use the Pulse/PipeWire default source selected by the desktop, while
+        // avoiding FreeRDP's unstable AAC input path observed during teardown.
+        args.push(STABLE_MICROPHONE_REDIRECTION.into());
     }
     if plan.devices.printers {
         args.push("/printer".into());
@@ -64,9 +69,7 @@ pub fn build_command(
     if plan.display.dynamic_resolution {
         args.push("+dynamic-resolution".into());
     }
-    if let PlannedRoute::RdGateway { gateway } = &plan.route {
-        args.push(format!("/gateway:g:{gateway}").into());
-    }
+    append_gateway_args(plan, &mut args);
     if let NetworkProfile::Auto = plan.security.network_profile {
     } else {
         args.push(format!("/network:{}", network(plan.security.network_profile)).into());
@@ -94,6 +97,39 @@ pub fn build_command(
             .map(OsString::from),
     );
     (plan.client.executable.clone(), args, Vec::new())
+}
+
+fn append_gateway_args(plan: &crate::model::ConnectionPlan, args: &mut Vec<OsString>) {
+    let PlannedRoute::RdGateway {
+        gateway,
+        username,
+        domain,
+    } = &plan.route
+    else {
+        return;
+    };
+    {
+        if plan.client.version.major >= 3 {
+            let mut gateway_argument = format!("/gateway:g:{gateway}");
+            if !username.is_empty() {
+                gateway_argument.push_str(",u:");
+                gateway_argument.push_str(username);
+            }
+            if !domain.is_empty() {
+                gateway_argument.push_str(",d:");
+                gateway_argument.push_str(domain);
+            }
+            args.push(gateway_argument.into());
+        } else {
+            args.push(format!("/g:{gateway}").into());
+            if !username.is_empty() {
+                args.push(format!("/gu:{username}").into());
+            }
+            if !domain.is_empty() {
+                args.push(format!("/gd:{domain}").into());
+            }
+        }
+    }
 }
 const fn network(value: NetworkProfile) -> &'static str {
     match value {

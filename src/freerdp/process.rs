@@ -5,6 +5,7 @@ use crate::credentials::askpass::AskpassLease;
 use crate::model::{PreparedConnection, SessionId};
 use crate::runtime::process::{LaunchMode, OwnedChild, spawn_child};
 use crate::runtime::registry::ChildKind;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::Command;
 
@@ -36,6 +37,7 @@ pub fn launch(
             .create(true)
             .append(true)
             .open(log)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         let errors = file.try_clone()?;
         command.stdout(file).stderr(errors);
     }

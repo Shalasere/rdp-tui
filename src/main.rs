@@ -1,7 +1,7 @@
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    rdp_tui::diagnostics::configure_from_env();
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     // FreeRDP invokes $FREERDP_ASKPASS with the prompt as argv (not "__askpass"),
     // so askpass mode is recognized by the inherited descriptor environment the
@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         };
     }
     if arguments.first().is_some_and(|argument| argument == "tui") {
-        return match rdp_tui::tui::run(&config_root()) {
+        return match rdp_tui::tui::run(&rdp_tui::paths::config_root()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("rdp-tui: {error}");
@@ -46,7 +46,7 @@ fn main() -> ExitCode {
             }
         };
     }
-    match rdp_tui::cli::commands::run(&arguments, &config_root()) {
+    match rdp_tui::cli::commands::run(&arguments, &rdp_tui::paths::config_root()) {
         Ok(output) => {
             print!("{output}");
             ExitCode::SUCCESS
@@ -56,12 +56,4 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn config_root() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from(".config"))
-        .join("rdp-tui")
 }

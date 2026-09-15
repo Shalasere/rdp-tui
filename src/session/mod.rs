@@ -11,14 +11,16 @@ use crate::freerdp::deep_test::{AuthOutcome, authenticate};
 use crate::freerdp::discover::discover;
 use crate::freerdp::process::launch;
 use crate::model::{
-    ConnectionFailure, ConnectionPlan, PreparedConnection, Profile, Renderer, ResolvedCredentials,
-    RouteHandle, SessionId, SessionResult,
+    ConnectionFailure, ConnectionPlan, PreparedConnection, Profile, ProfileId, Renderer,
+    ResolvedCredentials, RouteHandle, SessionId, SessionResult,
 };
 use crate::planner::plan;
-use crate::preflight::{prepare_for_session, verify_prepared};
+use crate::preflight::{PreflightError, prepare_for_session, verify_prepared};
 use crate::runtime::process::LaunchMode;
 use crate::runtime::registry::still_matches;
 use crate::ssh::tunnel::terminate;
+use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -55,9 +57,10 @@ impl From<CredentialError> for SessionError {
 /// Failure while planning or starting a session from a profile.
 #[derive(Debug)]
 pub enum ConnectError {
+    AlreadyRunning(SessionId),
     Discover(String),
     Plan(ConnectionFailure),
-    Preflight(ConnectionFailure),
+    Preflight(PreflightError),
     Credential(CredentialError),
     Io(std::io::Error),
 }
@@ -65,10 +68,16 @@ pub enum ConnectError {
 impl std::fmt::Display for ConnectError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AlreadyRunning(session) => {
+                write!(
+                    formatter,
+                    "session {session} is already active for this profile"
+                )
+            }
             Self::Discover(message) => write!(formatter, "no usable FreeRDP client: {message}"),
             Self::Plan(failure) => write!(formatter, "cannot plan connection: {failure:?}"),
-            Self::Preflight(failure) => {
-                write!(formatter, "connection is not reachable: {failure:?}")
+            Self::Preflight(error) => {
+                write!(formatter, "connection preflight failed: {error}")
             }
             Self::Credential(error) => write!(formatter, "credential acquisition failed: {error}"),
             Self::Io(error) => error.fmt(formatter),
@@ -138,6 +147,9 @@ fn run_with_askpass(
 /// Returns [`ConnectError`] when the profile cannot be planned or the detached
 /// supervisor cannot be spawned.
 pub fn connect_profile(profile: &Profile, executable: &Path) -> Result<SessionId, ConnectError> {
+    if let Some(session) = active_session_for_profile(&record::sessions_dir(), profile.id) {
+        return Err(ConnectError::AlreadyRunning(session));
+    }
     let mut plan = plan_profile(profile)?;
     fill_sdl_fullscreen_size(&mut plan);
     let session = SessionId::generate();
@@ -193,7 +205,9 @@ fn detect_primary_resolution() -> Option<(u16, u16)> {
 pub fn test_profile(profile: &Profile, timeout: Duration) -> Result<(), ConnectError> {
     let plan = plan_profile(profile)?;
     let session = SessionId::generate();
-    let mut prepared = prepare_for_session(&plan, session).map_err(ConnectError::Preflight)?;
+    let mut prepared = prepare_for_session(&plan, session)
+        .map_err(PreflightError::Preparation)
+        .map_err(ConnectError::Preflight)?;
     let reachable = verify_prepared(&prepared, timeout);
     if let Some(RouteHandle::SshTunnel(handle)) = &mut prepared.route_handle {
         let _ = terminate(handle);
@@ -215,6 +229,8 @@ pub enum DeepTest {
     AuthFailed,
     /// The host could not be reached to attempt authentication.
     Unreachable,
+    /// `FreeRDP` exited without a positively recognized authentication result.
+    Indeterminate,
     /// This `FreeRDP` build's auth-only mode is not version-validated.
     NotSupported,
     /// Skipped: a deep-test ran too recently for this profile (a courtesy, not
@@ -235,6 +251,15 @@ This confirmation is asked once per profile.";
 /// Minimum spacing between deep-tests of one profile — a courtesy that reduces
 /// the chance of tripping a target account-lockout policy rdp-tui cannot observe.
 const DEEP_TEST_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Whether the next deep-test must show the one-time lockout warning first.
+#[must_use]
+pub fn deep_test_requires_acknowledgement(profile: &Profile, state_dir: &Path) -> bool {
+    let stamp = state_dir
+        .join("deep_test")
+        .join(format!("{}.json", profile.id));
+    needs_acknowledgement(&stamp, false)
+}
 
 /// Verify a profile's stored credentials with `FreeRDP`'s auth-only mode. Never
 /// automatic and always explicit (DEC-deep-test); gated on a version-validated
@@ -283,11 +308,12 @@ pub fn deep_test_profile(
         lease.main.as_ref(),
     )
     .map_err(ConnectError::Io)?;
-    record_deep_test(&stamp);
+    record_deep_test(&stamp).map_err(ConnectError::Io)?;
     Ok(match outcome {
         AuthOutcome::Authenticated => DeepTest::Authenticated,
         AuthOutcome::LogonFailure => DeepTest::AuthFailed,
         AuthOutcome::Unreachable => DeepTest::Unreachable,
+        AuthOutcome::Indeterminate => DeepTest::Indeterminate,
     })
 }
 
@@ -306,12 +332,20 @@ fn recently_deep_tested(stamp: &Path) -> bool {
         .is_some_and(|elapsed| elapsed < DEEP_TEST_INTERVAL)
 }
 
-fn record_deep_test(stamp: &Path) {
-    if let Some(parent) = stamp.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+fn record_deep_test(stamp: &Path) -> std::io::Result<()> {
+    let parent = stamp
+        .parent()
+        .ok_or_else(|| std::io::Error::other("deep-test stamp has no parent"))?;
+    crate::paths::ensure_private_dir(parent)?;
     // The file's mtime is the rate-limit clock.
-    let _ = std::fs::write(stamp, b"{}\n");
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    temporary.write_all(b"{}\n")?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(stamp).map_err(|error| error.error)?;
+    std::fs::File::open(parent)?.sync_all()
 }
 
 /// Health of a detached session as seen from its record.
@@ -356,13 +390,68 @@ pub fn scan_sessions(dir: &Path) -> Vec<SessionStatus> {
     statuses
 }
 
+fn active_session_for_profile(dir: &Path, profile_id: ProfileId) -> Option<SessionId> {
+    scan_sessions(dir)
+        .into_iter()
+        .find(|status| {
+            status.record.profile_id == profile_id && !matches!(status.health, SessionHealth::Stale)
+        })
+        .map(|status| status.record.session_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DEEP_TEST_INTERVAL, needs_acknowledgement, recently_deep_tested, record_deep_test,
+        DEEP_TEST_INTERVAL, active_session_for_profile, needs_acknowledgement,
+        recently_deep_tested, record, record_deep_test,
     };
+    use crate::model::{ProfileId, SessionId};
+    use crate::runtime::process::{LaunchMode, spawn_child};
+    use crate::runtime::registry::ChildKind;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Command;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    #[test]
+    fn active_profile_session_rejects_only_a_live_matching_profile() {
+        let dir = TempDir::new().unwrap();
+        let profile_id = ProfileId::generate();
+        let session_id = SessionId::generate();
+        let mut command = Command::new("sleep");
+        command.arg("5");
+        let mut child = spawn_child(
+            &mut command,
+            ChildKind::Supervisor,
+            session_id,
+            LaunchMode::Detached,
+        )
+        .unwrap();
+        record::write(
+            dir.path(),
+            &record::SessionRecord {
+                session_id,
+                profile_id,
+                supervisor: child.identity,
+                freerdp: None,
+                tunnel: None,
+                state: record::SessionRecordState::Preparing,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            active_session_for_profile(dir.path(), profile_id),
+            Some(session_id)
+        );
+        assert_eq!(
+            active_session_for_profile(dir.path(), ProfileId::generate()),
+            None
+        );
+
+        child.terminate_if_owned().unwrap();
+        assert_eq!(active_session_for_profile(dir.path(), profile_id), None);
+    }
 
     #[test]
     fn first_deep_test_of_a_profile_needs_acknowledgement() {
@@ -378,8 +467,20 @@ mod tests {
     fn once_a_deep_test_has_run_no_further_acknowledgement_is_asked() {
         let dir = TempDir::new().unwrap();
         let stamp = dir.path().join("deep_test").join("profile.json");
-        record_deep_test(&stamp);
+        record_deep_test(&stamp).unwrap();
         assert!(stamp.exists());
+        assert_eq!(
+            std::fs::metadata(stamp.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&stamp).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         // A recorded stamp means the profile has been deep-tested before.
         assert!(!needs_acknowledgement(&stamp, false));
     }
@@ -388,7 +489,7 @@ mod tests {
     fn the_rate_limit_is_persisted_so_a_separate_process_would_observe_it() {
         let dir = TempDir::new().unwrap();
         let stamp = dir.path().join("deep_test").join("profile.json");
-        record_deep_test(&stamp);
+        record_deep_test(&stamp).unwrap();
         // A fresh stamp file (what any process reading the same path would see)
         // blocks a second run inside the courtesy interval.
         assert!(recently_deep_tested(&stamp));

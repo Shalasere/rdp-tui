@@ -111,6 +111,8 @@ impl Route {
                 .map_err(|error| format!("invalid gateway '{host}': {error}"))?;
             return Ok(Self::RdGateway {
                 gateway,
+                username: String::new(),
+                domain: String::new(),
                 credential: None,
             });
         }

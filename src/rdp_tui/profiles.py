@@ -200,7 +200,9 @@ def command_for(profile: Profile, client: str = "xfreerdp3", detected_resolution
     if profile.shared_folder:
         command.append(f"/drive:rdp-tui,{Path(profile.shared_folder).expanduser()}")
     if profile.microphone:
-        command.append("/microphone")
+        # Follow the desktop's Pulse/PipeWire default source, but constrain the
+        # redirected stream to mono PCM so FreeRDP does not select AAC input.
+        command.append("/microphone:sys:pulse,format:1,rate:48000,channel:1")
     if profile.auto_reconnect:
         command.append("+auto-reconnect")
     if profile.network_type != "auto":

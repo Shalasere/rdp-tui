@@ -48,16 +48,22 @@ impl SecretServiceStore {
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            // Output is intentionally discarded so backend diagnostics cannot
+            // leak secrets and a full pipe cannot deadlock `wait`.
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|error| command_error(&error))?;
         let mut child = output;
-        child
+        if let Err(error) = child
             .stdin
             .take()
             .ok_or_else(|| CredentialError::Unavailable("secret-tool stdin unavailable".into()))?
             .write_all(secret.expose_secret().as_bytes())
-            .map_err(|error| CredentialError::Unavailable(error.to_string()))?;
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CredentialError::Unavailable(error.to_string()));
+        }
         let status = child
             .wait()
             .map_err(|error| CredentialError::Unavailable(error.to_string()))?;
@@ -78,6 +84,11 @@ impl SecretServiceStore {
     ///
     /// Returns an error when `secret-tool` cannot contact Secret Service.
     pub fn delete(&self, reference: CredentialRef) -> Result<(), CredentialError> {
+        if reference.backend != CredentialBackend::SecretService {
+            return Err(CredentialError::Unavailable(
+                "credential backend does not match Secret Service".into(),
+            ));
+        }
         let status = Command::new(&self.executable)
             .args([
                 "clear",

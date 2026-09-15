@@ -9,10 +9,23 @@ pub struct ProfileStore {
     config: ConfigStore,
 }
 
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub struct MergeCounts {
+    pub added: usize,
+    pub updated: usize,
+    pub skipped: usize,
+}
+
 impl ProfileStore {
     #[must_use]
     pub fn new(config: ConfigStore) -> Self {
         Self { config }
+    }
+
+    /// Configuration root backing this store.
+    #[must_use]
+    pub fn config_root(&self) -> &std::path::Path {
+        self.config.root()
     }
 
     /// Return all persisted profiles in their saved order.
@@ -39,18 +52,30 @@ impl ProfileStore {
     ///
     /// Returns an error for lock contention, invalid profiles, or filesystem failure.
     pub fn upsert(&self, profile: Profile) -> Result<(), StoreError> {
+        self.upsert_replacing(profile).map(|_| ())
+    }
+
+    /// Insert or replace one profile and return the value replaced inside the
+    /// same locked transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for lock contention, invalid profiles, or filesystem failure.
+    pub fn upsert_replacing(&self, profile: Profile) -> Result<Option<Profile>, StoreError> {
+        let mut previous = None;
         self.config.update_profiles(|document| {
             if let Some(existing) = document
                 .profiles
                 .iter_mut()
                 .find(|saved| saved.id == profile.id)
             {
-                *existing = profile;
+                previous = Some(std::mem::replace(existing, profile));
             } else {
                 document.profiles.push(profile);
             }
             Ok(())
-        })
+        })?;
+        Ok(previous)
     }
 
     /// Remove a profile and return whether it existed.
@@ -68,4 +93,61 @@ impl ProfileStore {
         })?;
         Ok(removed)
     }
+
+    /// Merge a complete import batch in one locked read-modify-write transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for lock contention, validation, or durable-write failure.
+    pub fn merge(&self, profiles: Vec<Profile>) -> Result<MergeCounts, StoreError> {
+        self.merge_replacing(profiles).map(|(counts, _)| counts)
+    }
+
+    /// Merge a batch and return profiles replaced inside that same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for lock contention, validation, or durable-write failure.
+    pub fn merge_replacing(
+        &self,
+        profiles: Vec<Profile>,
+    ) -> Result<(MergeCounts, Vec<Profile>), StoreError> {
+        let mut counts = MergeCounts::default();
+        let mut replaced = Vec::new();
+        self.config.update_profiles(|document| {
+            for profile in profiles {
+                if let Some(index) = document
+                    .profiles
+                    .iter()
+                    .position(|current| current.id == profile.id)
+                {
+                    if document.profiles[index] == profile {
+                        counts.skipped += 1;
+                    } else {
+                        replaced.push(std::mem::replace(&mut document.profiles[index], profile));
+                        counts.updated += 1;
+                    }
+                    continue;
+                }
+                if document
+                    .profiles
+                    .iter()
+                    .any(|current| same_except_id(current, &profile))
+                {
+                    counts.skipped += 1;
+                } else {
+                    document.profiles.push(profile);
+                    counts.added += 1;
+                }
+            }
+            Ok(())
+        })?;
+        Ok((counts, replaced))
+    }
+}
+
+fn same_except_id(current: &Profile, incoming: &Profile) -> bool {
+    let mut incoming = incoming.clone();
+    incoming.id = current.id;
+    current == &incoming
 }

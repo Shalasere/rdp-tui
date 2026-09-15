@@ -62,9 +62,16 @@ pub fn store_encrypted_password(
     EncryptedFileStore::new(config_root).store(password)
 }
 
-/// Best-effort removal of a previously stored encrypted-file secret.
-pub fn forget_encrypted(config_root: &Path, reference: CredentialRef) {
-    let _ = EncryptedFileStore::new(config_root).delete(reference);
+/// Best-effort removal through the concrete backend pinned in the reference.
+pub fn forget(config_root: &Path, reference: CredentialRef) {
+    match reference.backend {
+        CredentialBackend::SecretService => {
+            let _ = SecretServiceStore::default().delete(reference);
+        }
+        CredentialBackend::EncryptedFile => {
+            let _ = EncryptedFileStore::new(config_root).delete(reference);
+        }
+    }
 }
 
 /// Non-serializable secrets held only for the lifetime of a connection attempt.

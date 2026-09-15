@@ -2,6 +2,7 @@ use rdp_tui::model::SessionId;
 use rdp_tui::runtime::process::{LaunchMode, spawn_child};
 use rdp_tui::runtime::registry::ChildKind;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 fn session() -> SessionId {
     "550e8400-e29b-41d4-a716-446655440000"
@@ -69,4 +70,28 @@ fn one_shot_child_stays_in_the_caller_process_group() {
         "a one-shot child should stay in the caller's process group"
     );
     child.terminate_if_owned().unwrap();
+}
+
+#[test]
+fn background_reaper_collects_an_exited_detached_child() {
+    let mut command = Command::new("sleep");
+    command.arg("0.05");
+    let child = spawn_child(
+        &mut command,
+        ChildKind::Supervisor,
+        session(),
+        LaunchMode::Detached,
+    )
+    .unwrap();
+    let pid = child.child.id();
+    child.reap_in_background();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while std::path::Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "background waiter should reap child {pid}"
+    );
 }

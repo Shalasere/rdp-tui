@@ -1,6 +1,7 @@
 use rdp_tui::model::{ProfileId, SessionId};
 use rdp_tui::runtime::registry::{ChildKind, ProcessIdentity, observe};
 use rdp_tui::session::record::{SessionRecord, SessionRecordState, read, remove, write};
+use std::os::unix::fs::PermissionsExt as _;
 use tempfile::TempDir;
 
 fn identity(session: SessionId) -> ProcessIdentity {
@@ -25,6 +26,19 @@ fn a_session_record_round_trips_through_the_runtime_directory() {
         state: SessionRecordState::Running,
     };
     write(dir.path(), &record).unwrap();
+
+    assert_eq!(
+        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(dir.path().join(format!("{session}.json")))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
 
     let loaded = read(dir.path(), session).unwrap().expect("record present");
     assert_eq!(loaded, record);

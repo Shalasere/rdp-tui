@@ -10,7 +10,32 @@ fn imports_python_profiles_without_persisted_credentials() {
     assert_eq!(profile.display.renderer, Renderer::X11);
     assert_eq!(profile.security.certificate_policy, CertificatePolicy::Tofu);
     assert!(profile.credential.is_none());
-    assert!(matches!(profile.route, Route::RdGateway { .. }));
+    assert!(matches!(
+        &profile.route,
+        Route::RdGateway {
+            gateway,
+            username,
+            domain,
+            credential: None,
+        } if gateway.to_string() == "gateway:443" && username.is_empty() && domain.is_empty()
+    ));
+}
+
+#[test]
+fn migrates_gateway_identity_and_defaults_its_port_to_https() {
+    let document = import_python_profiles(
+        r#"[{"id":"550e8400-e29b-41d4-a716-446655440000","name":"Anima","host":"10.0.0.111","gateway_host":"edge.example","gateway_user":"edge-user","gateway_domain":"EDGE"}]"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        &document.profiles[0].route,
+        Route::RdGateway {
+            gateway,
+            username,
+            domain,
+            credential: None,
+        } if gateway.to_string() == "edge.example:443" && username == "edge-user" && domain == "EDGE"
+    ));
 }
 
 #[test]

@@ -36,11 +36,10 @@ pub struct SessionRecord {
     pub state: SessionRecordState,
 }
 
-/// Resolve `$XDG_RUNTIME_DIR/rdp-tui/sessions`, the per-user session directory.
+/// Resolve the per-user session directory, including the UID-scoped fallback.
 #[must_use]
-pub fn sessions_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(|base| PathBuf::from(base).join("rdp-tui").join("sessions"))
+pub fn sessions_dir() -> PathBuf {
+    crate::paths::runtime_sessions_dir()
 }
 
 fn record_path(dir: &Path, session: SessionId) -> PathBuf {
@@ -54,7 +53,7 @@ fn record_path(dir: &Path, session: SessionId) -> PathBuf {
 /// Returns an I/O error when the directory cannot be created or the record
 /// cannot be serialized or atomically replaced.
 pub fn write(dir: &Path, record: &SessionRecord) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+    crate::paths::ensure_private_dir(dir)?;
     let json = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
     let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
     temporary.write_all(&json)?;

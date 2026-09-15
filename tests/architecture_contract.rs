@@ -38,7 +38,7 @@ fn replace_in_file(path: &Path, from: &str, to: &str) {
 fn repository_contract_is_valid() {
     let report = validate_architecture_contract(repository_contract_dir()).expect("valid contract");
     assert_eq!(report.yaml_documents, 5);
-    assert_eq!(report.modules, 13);
+    assert_eq!(report.modules, 16);
     assert_eq!(report.stable_ids, 49);
     assert_eq!(report.binding_types, 44);
 }

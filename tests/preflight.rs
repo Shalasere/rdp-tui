@@ -49,10 +49,14 @@ fn tcp_check_distinguishes_a_reachable_listener_from_a_closed_port() {
     let endpoint = format!("127.0.0.1:{}", listener.local_addr().unwrap().port())
         .parse()
         .unwrap();
-    assert_eq!(check_tcp(&endpoint, Duration::from_millis(100)), Ok(()));
+    assert!(check_tcp(&endpoint, Duration::from_millis(100)).is_ok());
 
     drop(listener);
-    assert!(check_tcp(&endpoint, Duration::from_millis(100)).is_err());
+    let error = check_tcp(&endpoint, Duration::from_millis(100)).unwrap_err();
+    assert_eq!(error.failure(), rdp_tui::model::ConnectionFailure::Network);
+    let message = error.to_string();
+    assert!(message.contains(&endpoint.to_string()));
+    assert!(message.contains("Connection refused"));
 }
 
 #[test]
@@ -62,7 +66,11 @@ fn gateway_preflight_checks_only_the_gateway() {
         .parse()
         .unwrap();
     let prepared = preflight(
-        &plan(PlannedRoute::RdGateway { gateway }),
+        &plan(PlannedRoute::RdGateway {
+            gateway,
+            username: String::new(),
+            domain: String::new(),
+        }),
         Duration::from_millis(100),
     )
     .unwrap();

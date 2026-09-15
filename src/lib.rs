@@ -3,8 +3,11 @@
 pub mod cli;
 pub mod config;
 pub mod credentials;
+pub mod diagnostics;
 pub mod freerdp;
 pub mod model;
+pub mod operations;
+pub mod paths;
 pub mod planner;
 pub mod preflight;
 pub mod profile_store;

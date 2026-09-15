@@ -10,11 +10,12 @@ use crate::model::{
     ConnectionFailure, ConnectionPlan, FreeRdpClient, HistoryEntry, PreparedConnection, ProfileId,
     Renderer, RouteHandle, SessionId, SessionResult,
 };
-use crate::preflight::{prepare_for_session, verify_prepared};
+use crate::preflight::{PreflightError, prepare_for_session, verify_prepared};
 use crate::runtime::process::{LaunchMode, OwnedChild};
 use crate::runtime::registry::{ChildKind, ProcessIdentity, observe};
 use crate::session::record::{self, SessionRecord, SessionRecordState};
 use crate::ssh::tunnel::terminate;
+use std::io::Read as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -27,7 +28,7 @@ const MAP_GRACE: Duration = Duration::from_secs(3);
 #[derive(Debug)]
 pub enum SuperviseError {
     Credential(CredentialError),
-    Preflight(ConnectionFailure),
+    Preflight(PreflightError),
     Io(std::io::Error),
 }
 
@@ -35,7 +36,7 @@ impl std::fmt::Display for SuperviseError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Credential(error) => write!(formatter, "credential acquisition failed: {error}"),
-            Self::Preflight(failure) => write!(formatter, "preflight failed: {failure:?}"),
+            Self::Preflight(error) => write!(formatter, "preflight failed: {error}"),
             Self::Io(error) => error.fmt(formatter),
         }
     }
@@ -61,6 +62,7 @@ pub fn supervise(
     session: SessionId,
     store: &impl CredentialStore,
     helper: &Path,
+    config_root: &Path,
     records_dir: &Path,
     state_dir: &Path,
     preflight_timeout: Duration,
@@ -73,7 +75,9 @@ pub fn supervise(
         session,
         store,
         helper,
+        config_root,
         records_dir,
+        state_dir,
         preflight_timeout,
         supervisor,
     );
@@ -91,7 +95,9 @@ fn run_supervised(
     session: SessionId,
     store: &impl CredentialStore,
     helper: &Path,
+    config_root: &Path,
     records_dir: &Path,
+    state_dir: &Path,
     preflight_timeout: Duration,
     supervisor: ProcessIdentity,
 ) -> Result<SessionResult, SuperviseError> {
@@ -109,70 +115,119 @@ fn run_supervised(
     let askpass =
         AskpassLease::prepare(&lease, helper.to_path_buf()).map_err(SuperviseError::Io)?;
 
-    let mut prepared = prepare_for_session(plan, session).map_err(SuperviseError::Preflight)?;
-    verify_prepared(&prepared, preflight_timeout).map_err(SuperviseError::Preflight)?;
-    record.tunnel = tunnel_identity(&prepared, session);
+    let mut prepared = prepare_for_session(plan, session)
+        .map_err(PreflightError::Preparation)
+        .map_err(SuperviseError::Preflight)?;
+    let outcome = (|| {
+        verify_prepared(&prepared, preflight_timeout).map_err(SuperviseError::Preflight)?;
+        record.tunnel = tunnel_identity(&prepared, session);
 
-    let started = Instant::now();
-    let log = records_dir.join(format!("{session}.log"));
-    let mut child = launch(
-        &prepared,
-        session,
-        Some(&askpass),
-        LaunchMode::OneShot,
-        Some(&log),
-    )
-    .map_err(SuperviseError::Io)?;
-
-    record.freerdp = Some(child.identity);
-    record.state = SessionRecordState::Running;
-    record::write(records_dir, &record).map_err(SuperviseError::Io)?;
-
-    let mut outcome = monitor(&mut child, &log).map_err(SuperviseError::Io)?;
-
-    // X11 fallback (parity with Python `should_fallback_to_x11`): the
-    // experimental SDL client exited non-zero before it could map a window on a
-    // fullscreen profile. Retry once with the stable X11 client, reusing the
-    // already-acquired route and askpass. Gated on the X11 client actually being
-    // installed (freerdp.capabilities.x11).
-    let exited_nonzero = matches!(&outcome, MonitorOutcome::Exited(status) if !status.success());
-    if should_fallback_to_x11(
-        prepared.plan.client.renderer,
-        prepared.plan.display.fullscreen,
-        exited_nonzero,
-        started.elapsed(),
-    ) && let Some(x11) = discover_x11_client()
-    {
-        prepared.plan.client = x11;
-        let mut fallback = launch(
+        let started = Instant::now();
+        let log = SessionLog::new(records_dir.join(format!("{session}.log")));
+        let mut child = launch(
             &prepared,
             session,
             Some(&askpass),
             LaunchMode::OneShot,
-            Some(&log),
+            Some(log.path()),
         )
         .map_err(SuperviseError::Io)?;
-        record.freerdp = Some(fallback.identity);
+
+        record.freerdp = Some(child.identity);
+        record.state = SessionRecordState::Running;
         record::write(records_dir, &record).map_err(SuperviseError::Io)?;
-        outcome = monitor(&mut fallback, &log).map_err(SuperviseError::Io)?;
+
+        let mut monitor_outcome = monitor(&mut child, log.path()).map_err(SuperviseError::Io)?;
+
+        // X11 fallback (parity with Python `should_fallback_to_x11`): the
+        // experimental SDL client exited non-zero before it could map a window on a
+        // fullscreen profile. Retry once with the stable X11 client, reusing the
+        // already-acquired route and askpass. Gated on the X11 client actually being
+        // installed (freerdp.capabilities.x11).
+        let exited_nonzero =
+            matches!(&monitor_outcome, MonitorOutcome::Exited(status) if !status.success());
+        if should_fallback_to_x11(
+            prepared.plan.client.renderer,
+            prepared.plan.display.fullscreen,
+            exited_nonzero,
+            started.elapsed(),
+        ) && let Some(x11) = discover_x11_client()
+        {
+            prepared.plan.client = x11;
+            let mut fallback = launch(
+                &prepared,
+                session,
+                Some(&askpass),
+                LaunchMode::OneShot,
+                Some(log.path()),
+            )
+            .map_err(SuperviseError::Io)?;
+            record.freerdp = Some(fallback.identity);
+            record::write(records_dir, &record).map_err(SuperviseError::Io)?;
+            monitor_outcome = monitor(&mut fallback, log.path()).map_err(SuperviseError::Io)?;
+        }
+
+        record.state = SessionRecordState::Ending;
+        record::write(records_dir, &record).map_err(SuperviseError::Io)?;
+
+        result_from_monitor(
+            monitor_outcome,
+            &prepared,
+            profile_id,
+            config_root,
+            state_dir,
+            started.elapsed(),
+        )
+    })();
+
+    let cleanup = if let Some(RouteHandle::SshTunnel(handle)) = &mut prepared.route_handle {
+        terminate(handle).map_err(SuperviseError::Io)
+    } else {
+        Ok(())
+    };
+    match (outcome, cleanup) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
+}
 
-    record.state = SessionRecordState::Ending;
-    record::write(records_dir, &record).map_err(SuperviseError::Io)?;
-
-    if let Some(RouteHandle::SshTunnel(handle)) = &mut prepared.route_handle {
-        terminate(handle).map_err(SuperviseError::Io)?;
-    }
-
+fn result_from_monitor(
+    outcome: MonitorOutcome,
+    prepared: &PreparedConnection,
+    profile_id: ProfileId,
+    config_root: &Path,
+    state_dir: &Path,
+    duration: Duration,
+) -> Result<SessionResult, SuperviseError> {
     let (exit_code, failure) = match outcome {
-        MonitorOutcome::Exited(status) => (
-            status.code(),
-            (!status.success()).then_some(ConnectionFailure::ProcessFailure),
-        ),
-        MonitorOutcome::CertificateChanged => (None, Some(ConnectionFailure::Certificate)),
+        MonitorOutcome::Exited(status) => {
+            let _ = crate::freerdp::certificate::remove_mismatch(state_dir, profile_id);
+            (
+                status.code(),
+                (!status.success()).then_some(ConnectionFailure::ProcessFailure),
+            )
+        }
+        MonitorOutcome::CertificateChanged(presented_sha256) => {
+            let endpoint = prepared.plan.target.clone();
+            let pin = crate::freerdp::certificate::pin_path(
+                &crate::paths::freerdp_config_root(config_root),
+                &endpoint.host.to_string(),
+                endpoint.port,
+            );
+            let mismatch = crate::freerdp::certificate::CertificateMismatch {
+                profile_id,
+                endpoint,
+                pinned_sha256: crate::freerdp::certificate::fingerprint(&pin)
+                    .map_err(SuperviseError::Io)?,
+                presented_sha256,
+            };
+            crate::freerdp::certificate::write_mismatch(state_dir, &mismatch)
+                .map_err(SuperviseError::Io)?;
+            (None, Some(ConnectionFailure::Certificate))
+        }
     };
     Ok(SessionResult {
-        duration: started.elapsed(),
+        duration,
         exit_code,
         failure,
         renderer: prepared.plan.client.renderer,
@@ -202,7 +257,25 @@ fn discover_x11_client() -> Option<FreeRdpClient> {
 
 enum MonitorOutcome {
     Exited(std::process::ExitStatus),
-    CertificateChanged,
+    CertificateChanged(String),
+}
+
+struct SessionLog(std::path::PathBuf);
+
+impl SessionLog {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for SessionLog {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// Wait for `FreeRDP`, interrupting a hidden changed-certificate prompt if one
@@ -211,17 +284,28 @@ enum MonitorOutcome {
 /// is terminated.
 fn monitor(child: &mut OwnedChild, log: &Path) -> std::io::Result<MonitorOutcome> {
     const POLL: Duration = Duration::from_millis(100);
+    const TAIL_LIMIT: usize = 64 * 1024;
+    let mut reader = std::fs::File::open(log)?;
+    let mut tail = Vec::new();
     loop {
-        if let Some(status) = child.child.try_wait()? {
-            return Ok(MonitorOutcome::Exited(status));
-        }
-        if std::fs::read_to_string(log)
-            .ok()
-            .and_then(|output| crate::freerdp::certificate::changed_fingerprint(&output))
-            .is_some()
+        reader.read_to_end(&mut tail)?;
+        if let Some(fingerprint) =
+            crate::freerdp::certificate::changed_fingerprint(&String::from_utf8_lossy(&tail))
         {
             child.terminate_if_owned()?;
-            return Ok(MonitorOutcome::CertificateChanged);
+            return Ok(MonitorOutcome::CertificateChanged(fingerprint));
+        }
+        if tail.len() > TAIL_LIMIT {
+            tail.drain(..tail.len() - TAIL_LIMIT);
+        }
+        if let Some(status) = child.child.try_wait()? {
+            reader.read_to_end(&mut tail)?;
+            if let Some(fingerprint) =
+                crate::freerdp::certificate::changed_fingerprint(&String::from_utf8_lossy(&tail))
+            {
+                return Ok(MonitorOutcome::CertificateChanged(fingerprint));
+            }
+            return Ok(MonitorOutcome::Exited(status));
         }
         std::thread::sleep(POLL);
     }

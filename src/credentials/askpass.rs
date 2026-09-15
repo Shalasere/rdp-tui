@@ -75,11 +75,13 @@ impl AskpassLease {
 /// Returns an I/O error if the selected inherited descriptor is invalid or
 /// cannot be read, or if stdout cannot receive the secret.
 pub fn run_helper(prompt: &str) -> std::io::Result<()> {
-    let variable = if prompt.contains("GatewayPassword:") || prompt.contains("Gateway Password:") {
-        GATEWAY_FD
-    } else {
-        MAIN_FD
-    };
+    let normalized = prompt.to_ascii_lowercase();
+    let variable =
+        if normalized.contains("gatewaypassword:") || normalized.contains("gateway password:") {
+            GATEWAY_FD
+        } else {
+            MAIN_FD
+        };
     let raw_fd = std::env::var(variable).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,

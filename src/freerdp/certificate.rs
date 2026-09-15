@@ -7,16 +7,28 @@
 //! colon-free SHA-256 of the certificate DER so a pin and a presented value
 //! compare directly.
 
+use crate::model::{Endpoint, ProfileId};
 use base64::Engine as _;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::io;
+use std::io::{self, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
 const END: &str = "-----END CERTIFICATE-----";
+
+/// A certificate replacement observed during a connection and awaiting an
+/// explicit, exact-fingerprint confirmation.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateMismatch {
+    pub profile_id: ProfileId,
+    pub endpoint: Endpoint,
+    pub pinned_sha256: Option<String>,
+    pub presented_sha256: String,
+}
 
 /// Resolve the `FreeRDP` pin PEM path for `host:port` under a freerdp config dir.
 #[must_use]
@@ -81,13 +93,70 @@ pub fn archive(pin: &Path, backups: &Path, expected: Option<&str>) -> io::Result
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or("certificate.pem");
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis());
-    let destination = backups.join(format!("{name}.{stamp}.bak"));
+    let mut suffix = [0_u8; 16];
+    getrandom::fill(&mut suffix).map_err(io::Error::other)?;
+    let destination = backups.join(format!("{name}.{}.bak", hex_upper(&suffix)));
     std::fs::rename(pin, &destination)?;
     std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600))?;
     Ok(destination)
+}
+
+/// Persist a pending mismatch in owner-only application state.
+///
+/// # Errors
+///
+/// Returns an I/O error when the state cannot be written durably.
+pub fn write_mismatch(state_root: &Path, mismatch: &CertificateMismatch) -> io::Result<()> {
+    let directory = state_root.join("certificate-mismatches");
+    crate::paths::ensure_private_dir(&directory)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+    temporary
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    serde_json::to_writer_pretty(&mut temporary, mismatch).map_err(io::Error::other)?;
+    temporary.write_all(b"\n")?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(mismatch_path(state_root, mismatch.profile_id))
+        .map_err(|error| error.error)?;
+    std::fs::File::open(directory)?.sync_all()
+}
+
+/// Load the mismatch currently awaiting confirmation for `profile_id`.
+///
+/// # Errors
+///
+/// Returns an I/O or JSON error when existing state cannot be read.
+pub fn read_mismatch(
+    state_root: &Path,
+    profile_id: ProfileId,
+) -> io::Result<Option<CertificateMismatch>> {
+    match std::fs::read(mismatch_path(state_root, profile_id)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Remove a handled or superseded mismatch.
+///
+/// # Errors
+///
+/// Returns an I/O error other than an absent mismatch file.
+pub fn remove_mismatch(state_root: &Path, profile_id: ProfileId) -> io::Result<()> {
+    match std::fs::remove_file(mismatch_path(state_root, profile_id)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn mismatch_path(state_root: &Path, profile_id: ProfileId) -> PathBuf {
+    state_root
+        .join("certificate-mismatches")
+        .join(format!("{profile_id}.json"))
 }
 
 fn pem_to_der(pem: &str) -> Option<Vec<u8>> {

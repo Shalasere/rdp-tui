@@ -8,6 +8,7 @@ use crate::model::HistoryEntry;
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 /// Filesystem location and persistence operations for rdp-tui configuration.
@@ -17,6 +18,11 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
+    /// Root directory containing this store's documents.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -173,7 +179,8 @@ fn write_document<T: serde::Serialize>(
 fn acquire_lock(path: &Path) -> Result<File, StoreError> {
     const LOCK_ATTEMPTS: u32 = 50;
     const LOCK_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
-    fs::create_dir_all(path.parent().ok_or(StoreError::Corrupt)?)?;
+    let parent = path.parent().ok_or(StoreError::Corrupt)?;
+    crate::paths::ensure_private_dir(parent)?;
     let lock_path = path.with_file_name(format!(
         ".{}.lock",
         path.file_name().unwrap_or_default().to_string_lossy()
@@ -184,6 +191,7 @@ fn acquire_lock(path: &Path) -> Result<File, StoreError> {
         .create(true)
         .truncate(false)
         .open(lock_path)?;
+    lock.set_permissions(fs::Permissions::from_mode(0o600))?;
     // Retry briefly before giving up. A lock can be held only transiently -- most
     // notably an fd inherited into the fork->exec window of a spawned child (e.g.
     // the detached supervisor), whose O_CLOEXEC fd stays open until exec -- and a

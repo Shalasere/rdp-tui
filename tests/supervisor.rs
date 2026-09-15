@@ -62,6 +62,7 @@ fn supervise_runs_a_direct_session_and_clears_its_record() {
         session,
         &NoCredentials,
         Path::new("/usr/bin/rdp-tui"),
+        temporary.path(),
         records.path(),
         state.path(),
         Duration::from_secs(2),
@@ -127,6 +128,7 @@ fn supervise_interrupts_a_changed_certificate_and_reports_it() {
         session,
         &NoCredentials,
         Path::new("/usr/bin/rdp-tui"),
+        temporary.path(),
         records.path(),
         state.path(),
         Duration::from_secs(2),
@@ -138,5 +140,16 @@ fn supervise_interrupts_a_changed_certificate_and_reports_it() {
         Some(ConnectionFailure::Certificate)
     ));
     assert!(read(records.path(), session).unwrap().is_none());
+    let mismatch = rdp_tui::freerdp::certificate::read_mismatch(state.path(), profile)
+        .unwrap()
+        .expect("the presented fingerprint should be persisted for exact confirmation");
+    assert_eq!(
+        mismatch.presented_sha256,
+        "097F45AD7EADDD47DFEE3F2B1AD1EAECA7C314B7F238E130A5C058C6AE892350"
+    );
+    let internal_logs: Vec<_> = std::fs::read_dir(state.path().join("session-logs"))
+        .map(|entries| entries.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    assert!(internal_logs.is_empty(), "internal logs must be ephemeral");
     drop(listener);
 }

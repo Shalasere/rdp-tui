@@ -87,6 +87,15 @@ impl OwnedChild {
     pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.child.wait()
     }
+
+    /// Transfer ownership to a waiter thread so the child cannot remain a
+    /// zombie while a long-lived launcher continues running.
+    pub fn reap_in_background(mut self) {
+        drop(std::thread::spawn(move || {
+            let _ = self.child.wait();
+        }));
+    }
+
     /// Terminate the owned child only when its compound identity still matches.
     ///
     /// # Errors

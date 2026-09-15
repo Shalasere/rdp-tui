@@ -8,6 +8,10 @@ pub enum Route {
     Direct,
     RdGateway {
         gateway: Endpoint,
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        domain: String,
         credential: Option<CredentialRef>,
     },
     SshTunnel {
@@ -19,6 +23,13 @@ pub enum Route {
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum PlannedRoute {
     Direct,
-    RdGateway { gateway: Endpoint },
-    SshTunnel { jump_host: String, target: Endpoint },
+    RdGateway {
+        gateway: Endpoint,
+        username: String,
+        domain: String,
+    },
+    SshTunnel {
+        jump_host: String,
+        target: Endpoint,
+    },
 }

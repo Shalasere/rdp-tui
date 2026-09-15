@@ -84,7 +84,7 @@ fn command_renders_supported_profile_settings() {
     for expected in [
         "/auth-pkg-list:none,ntlm",
         "/sound",
-        "/microphone",
+        "/microphone:sys:pulse,format:1,rate:48000,channel:1",
         "/drive:rdp-tui-1,/srv/shared",
         "/admin",
         "/span",
@@ -135,4 +135,64 @@ fn sdl_fullscreen_uses_explicit_size_not_the_fullscreen_flag() {
     assert!(args.contains(&"/size:2560x1440".into()));
     assert!(args.contains(&"-grab-keyboard".into()));
     assert!(args.contains(&"-grab-mouse".into()));
+}
+
+#[test]
+fn gateway_command_includes_its_independent_identity() {
+    let plan = ConnectionPlan {
+        target: "anima:3389".parse().unwrap(),
+        route: PlannedRoute::RdGateway {
+            gateway: "edge.example:443".parse().unwrap(),
+            username: "gateway-user".into(),
+            domain: "EDGE".into(),
+        },
+        identity: IdentityConfig {
+            username: "desktop-user".into(),
+            domain: "LAN".into(),
+        },
+        display: DisplayConfig::default(),
+        devices: DeviceConfig::default(),
+        security: SecurityConfig::default(),
+        credentials: ResolvedCredentials::default(),
+        client: FreeRdpClient {
+            executable: PathBuf::from("xfreerdp3"),
+            renderer: Renderer::X11,
+            version: Version::new(3, 30, 0),
+        },
+    };
+    let prepared = prepare(&plan).unwrap();
+    let (_, args, _) = build_command(&prepared);
+    let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+    assert!(args.contains(&"/u:desktop-user".into()));
+    assert!(args.contains(&"/d:LAN".into()));
+    assert!(args.contains(&"/gateway:g:edge.example:443,u:gateway-user,d:EDGE".into()));
+}
+
+#[test]
+fn freerdp_two_uses_legacy_gateway_switches() {
+    let plan = ConnectionPlan {
+        target: "anima:3389".parse().unwrap(),
+        route: PlannedRoute::RdGateway {
+            gateway: "edge.example:443".parse().unwrap(),
+            username: "gateway-user".into(),
+            domain: "EDGE".into(),
+        },
+        identity: IdentityConfig::default(),
+        display: DisplayConfig::default(),
+        devices: DeviceConfig::default(),
+        security: SecurityConfig::default(),
+        credentials: ResolvedCredentials::default(),
+        client: FreeRdpClient {
+            executable: PathBuf::from("xfreerdp"),
+            renderer: Renderer::X11,
+            version: Version::new(2, 11, 0),
+        },
+    };
+    let prepared = prepare(&plan).unwrap();
+    let (_, args, _) = build_command(&prepared);
+    let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+    assert!(args.contains(&"/g:edge.example:443".into()));
+    assert!(args.contains(&"/gu:gateway-user".into()));
+    assert!(args.contains(&"/gd:EDGE".into()));
+    assert!(!args.iter().any(|arg| arg.starts_with("/gateway:")));
 }

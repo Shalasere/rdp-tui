@@ -6,27 +6,29 @@
 //! forbidden, so nothing is imported from `cli`).
 
 use super::terminal::TerminalGuard;
+mod view;
 use crate::config::ConfigStore;
-use crate::credentials::{SystemCredentialStore, forget_encrypted, store_encrypted_password};
+use crate::credentials::SystemCredentialStore;
 use crate::model::fields;
 use crate::model::{
     DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile, ProfileId, Route,
     SecurityConfig,
 };
+use crate::operations::{self, CredentialSlot};
 use crate::profile_store::ProfileStore;
-use crate::session::{DEEP_TEST_WARNING, connect_profile, test_profile};
+use crate::session::{
+    DEEP_TEST_WARNING, connect_profile, deep_test_requires_acknowledgement, test_profile,
+};
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Style, Stylize as _};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
-use secrecy::SecretString;
+use ratatui::widgets::ListState;
+use secrecy::zeroize::Zeroizing;
 use std::fmt::Write as _;
 use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -66,7 +68,10 @@ enum PromptAction {
 
 enum Mode {
     Browsing,
-    Password(String),
+    Password {
+        slot: CredentialSlot,
+        input: Zeroizing<String>,
+    },
     Prompt {
         label: String,
         input: String,
@@ -75,6 +80,7 @@ enum Mode {
     Editing(Box<EditForm>),
     /// A read-only details/session overlay; any key returns to browsing.
     Status(String),
+    CertificateMismatch(crate::freerdp::certificate::CertificateMismatch),
 }
 
 /// Every editable profile field, in the order shown in the form. Matches the set
@@ -85,6 +91,8 @@ enum Field {
     Host,
     Username,
     Domain,
+    GatewayUsername,
+    GatewayDomain,
     Route,
     Renderer,
     Fullscreen,
@@ -105,11 +113,13 @@ enum Field {
     Printers,
 }
 
-const FIELDS: [Field; 22] = [
+const FIELDS: [Field; 24] = [
     Field::Name,
     Field::Host,
     Field::Username,
     Field::Domain,
+    Field::GatewayUsername,
+    Field::GatewayDomain,
     Field::Route,
     Field::Renderer,
     Field::Fullscreen,
@@ -137,6 +147,8 @@ impl Field {
             Self::Host => "Host",
             Self::Username => "Username",
             Self::Domain => "Domain",
+            Self::GatewayUsername => "Gateway user",
+            Self::GatewayDomain => "Gateway domain",
             Self::Route => "Route",
             Self::Renderer => "Renderer",
             Self::Fullscreen => "Fullscreen",
@@ -166,6 +178,8 @@ impl Field {
                 | Self::Host
                 | Self::Username
                 | Self::Domain
+                | Self::GatewayUsername
+                | Self::GatewayDomain
                 | Self::Route
                 | Self::Resolution
         )
@@ -226,6 +240,14 @@ impl EditForm {
             Field::Host => self.host.clone(),
             Field::Username => self.draft.identity.username.clone(),
             Field::Domain => self.draft.identity.domain.clone(),
+            Field::GatewayUsername => match &self.draft.route {
+                Route::RdGateway { username, .. } => username.clone(),
+                _ => "(set gateway route first)".into(),
+            },
+            Field::GatewayDomain => match &self.draft.route {
+                Route::RdGateway { domain, .. } => domain.clone(),
+                _ => "(set gateway route first)".into(),
+            },
             Field::Route => self.draft.route.to_token(),
             Field::Renderer => self.draft.display.renderer.token().to_owned(),
             Field::Fullscreen => fields::format_bool(self.draft.display.fullscreen).to_owned(),
@@ -268,6 +290,20 @@ impl EditForm {
             Field::Host => self.host = text,
             Field::Username => self.draft.identity.username = text,
             Field::Domain => self.draft.identity.domain = text,
+            Field::GatewayUsername => {
+                let Route::RdGateway { username, .. } = &mut self.draft.route else {
+                    self.error = Some("Set Route to gateway:<host> first".into());
+                    return;
+                };
+                *username = text;
+            }
+            Field::GatewayDomain => {
+                let Route::RdGateway { domain, .. } = &mut self.draft.route else {
+                    self.error = Some("Set Route to gateway:<host> first".into());
+                    return;
+                };
+                *domain = text;
+            }
             Field::Route => match Route::from_token(text.trim()) {
                 Ok(route) => self.draft.route = route,
                 Err(error) => {
@@ -323,6 +359,8 @@ impl EditForm {
             | Field::Host
             | Field::Username
             | Field::Domain
+            | Field::GatewayUsername
+            | Field::GatewayDomain
             | Field::Route
             | Field::Resolution => {}
         }
@@ -339,6 +377,7 @@ fn deep_test_message(outcome: crate::session::DeepTest) -> &'static str {
         DeepTest::Authenticated => "credentials accepted",
         DeepTest::AuthFailed => "authentication failed — the host rejected the credentials",
         DeepTest::Unreachable => "could not reach the host to authenticate",
+        DeepTest::Indeterminate => "FreeRDP returned no recognized authentication result",
         DeepTest::NotSupported => "auth-only is not supported by this FreeRDP build",
         DeepTest::RateLimited => "skipped — deep-tested too recently (try again shortly)",
         DeepTest::NeedsAcknowledgement => "confirmation required",
@@ -352,11 +391,7 @@ fn now_secs() -> u64 {
 }
 
 fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("rdp-tui")
+    crate::paths::state_root()
 }
 
 struct App {
@@ -369,10 +404,14 @@ struct App {
     executable: PathBuf,
     config_root: PathBuf,
     mode: Mode,
+    background_tx: Sender<String>,
+    background_rx: Receiver<String>,
+    background_busy: bool,
 }
 
 impl App {
     fn new(profiles: Vec<Profile>, executable: PathBuf, config_root: PathBuf) -> Self {
+        let (background_tx, background_rx) = mpsc::channel();
         let mut app = Self {
             profiles,
             visible: Vec::new(),
@@ -382,6 +421,9 @@ impl App {
             executable,
             config_root,
             mode: Mode::Browsing,
+            background_tx,
+            background_rx,
+            background_busy: false,
         };
         app.recompute_visible();
         app.status = app.describe_current();
@@ -436,7 +478,11 @@ impl App {
 
     fn event_loop<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
         loop {
+            self.receive_background_result();
             terminal.draw(|frame| self.draw(frame))?;
+            if !event::poll(Duration::from_millis(50))? {
+                continue;
+            }
             let Event::Key(key) = event::read()? else {
                 continue;
             };
@@ -449,14 +495,22 @@ impl App {
                         return Ok(());
                     }
                 }
-                Mode::Password(_) => self.handle_password(key),
+                Mode::Password { .. } => self.handle_password(key),
                 Mode::Prompt { .. } => self.handle_prompt(key),
                 Mode::Editing(_) => self.handle_editing(key),
                 Mode::Status(_) => {
                     self.mode = Mode::Browsing;
                     self.status = self.describe_current();
                 }
+                Mode::CertificateMismatch(_) => self.handle_certificate_mismatch(key),
             }
+        }
+    }
+
+    fn receive_background_result(&mut self) {
+        while let Ok(status) = self.background_rx.try_recv() {
+            self.background_busy = false;
+            self.status = status;
         }
     }
 
@@ -472,7 +526,9 @@ impl App {
             KeyCode::Enter => self.connect(),
             KeyCode::Char('t') => self.test(),
             KeyCode::Char('D') => self.deep_test(),
-            KeyCode::Char('p') => self.begin_password(),
+            KeyCode::Char('p') => self.begin_password(CredentialSlot::Main),
+            KeyCode::Char('g') => self.begin_password(CredentialSlot::Gateway),
+            KeyCode::Char('T') => self.begin_certificate_mismatch(),
             KeyCode::Char('a') => self.begin_add(),
             KeyCode::Char('e') => self.begin_edit(),
             KeyCode::Char('c') => self.clone_current(),
@@ -481,6 +537,7 @@ impl App {
             KeyCode::Char('i') => self.begin_import(),
             KeyCode::Char('x') => self.begin_export(),
             KeyCode::Char('s') => self.begin_status(),
+            KeyCode::Char('L') => self.toggle_diagnostics(),
             KeyCode::Char('h') => self.begin_history(),
             KeyCode::Char('?') => self.begin_help(),
             _ => {}
@@ -496,12 +553,12 @@ impl App {
             }
             KeyCode::Enter => self.commit_password(),
             KeyCode::Backspace => {
-                if let Mode::Password(input) = &mut self.mode {
+                if let Mode::Password { input, .. } = &mut self.mode {
                     input.pop();
                 }
             }
             KeyCode::Char(character) => {
-                if let Mode::Password(input) = &mut self.mode {
+                if let Mode::Password { input, .. } = &mut self.mode {
                     input.push(character);
                 }
             }
@@ -552,7 +609,7 @@ impl App {
             PromptAction::ConfirmDeepTest(id) => {
                 if input.trim().eq_ignore_ascii_case("yes") {
                     if let Some(profile) = self.profiles.iter().find(|p| p.id == id).cloned() {
-                        self.run_deep_test(&profile, true);
+                        self.run_deep_test(profile, true);
                     }
                 } else {
                     self.status = "Deep-test cancelled.".into();
@@ -649,7 +706,7 @@ impl App {
         let id = profile.id;
         let name = profile.name.clone();
         let adding = form.target.is_none();
-        match self.store().upsert(profile) {
+        match operations::save_profile(&self.store(), &self.config_root, profile) {
             Ok(()) => {
                 self.mode = Mode::Browsing;
                 self.reload();
@@ -662,7 +719,7 @@ impl App {
             }
             // The store validates on write (e.g. an impossible multimon+span
             // combination); surface that under the still-open form.
-            Err(error) => self.set_form_error(&error.to_string()),
+            Err(error) => self.set_form_error(&error),
         }
     }
 
@@ -741,7 +798,7 @@ impl App {
         copy.name = format!("{} (copy)", copy.name);
         // A clone starts without the source's secret so deleting either profile
         // cannot forget a shared credential file.
-        copy.credential = None;
+        operations::strip_credentials(&mut copy);
         let (id, name) = (copy.id, copy.name.clone());
         match self.store().upsert(copy) {
             Ok(()) => {
@@ -769,16 +826,20 @@ impl App {
             self.status = "Delete cancelled.".into();
             return;
         }
-        let removed = self.profiles.iter().find(|profile| profile.id == id);
-        let (name, credential) = match removed {
-            Some(profile) => (profile.name.clone(), profile.credential),
-            None => (id.to_string(), None),
-        };
-        match self.store().remove(id) {
+        let removed = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned();
+        let name = removed
+            .as_ref()
+            .map_or_else(|| id.to_string(), |profile| profile.name.clone());
+        let result = removed.as_ref().map_or_else(
+            || Ok(false),
+            |profile| operations::delete_profile(&self.store(), &self.config_root, profile),
+        );
+        match result {
             Ok(_) => {
-                if let Some(credential) = credential {
-                    forget_encrypted(self.config_root.as_path(), credential);
-                }
                 self.reload();
                 self.status = format!("Deleted {name}");
             }
@@ -807,23 +868,13 @@ impl App {
             self.status = "Import cancelled.".into();
             return;
         }
-        match crate::config::import::import_path(Path::new(path)) {
-            Ok(profiles) => {
-                let store = self.store();
-                let existing = self.profiles.clone();
-                let (mut added, mut skipped) = (0_usize, 0_usize);
-                for profile in profiles {
-                    if existing
-                        .iter()
-                        .any(|current| same_except_id(current, &profile))
-                    {
-                        skipped += 1;
-                    } else if store.upsert(profile).is_ok() {
-                        added += 1;
-                    }
-                }
+        match operations::import_profiles(&self.store(), Path::new(path)) {
+            Ok(counts) => {
                 self.reload();
-                self.status = format!("Imported {added}, skipped {skipped} unchanged");
+                self.status = format!(
+                    "Imported {}, updated {}, skipped {}, failed {}",
+                    counts.added, counts.updated, counts.skipped, counts.failed
+                );
             }
             Err(error) => self.status = format!("Import failed: {error}"),
         }
@@ -907,20 +958,39 @@ impl App {
         }
         let _ = writeln!(text, "\nActive sessions:");
         let mut any = false;
-        if let Some(dir) = crate::session::record::sessions_dir() {
-            for session in crate::session::scan_sessions(&dir) {
-                any = true;
-                let _ = writeln!(
-                    text,
-                    "  {} — {:?} (profile {})",
-                    session.record.session_id, session.health, session.record.profile_id
-                );
-            }
+        for session in crate::session::scan_sessions(&crate::session::record::sessions_dir()) {
+            any = true;
+            let _ = writeln!(
+                text,
+                "  {} — {:?} (profile {})",
+                session.record.session_id, session.health, session.record.profile_id
+            );
         }
         if !any {
             let _ = writeln!(text, "  none active");
         }
+        let diagnostic_path = crate::diagnostics::path();
+        let _ = writeln!(
+            text,
+            "\nDiagnostics: {}",
+            diagnostic_path
+                .as_deref()
+                .map_or_else(|| "disabled".into(), |path| path.display().to_string())
+        );
         self.mode = Mode::Status(text);
+    }
+
+    fn toggle_diagnostics(&mut self) {
+        if let Some(path) = crate::diagnostics::path() {
+            crate::diagnostics::disable();
+            self.status = format!("Diagnostics disabled (log retained at {})", path.display());
+            return;
+        }
+        let path = state_dir().join("diagnostics.log");
+        self.status = match crate::diagnostics::enable(path.clone()) {
+            Ok(()) => format!("Diagnostics enabled: {}", path.display()),
+            Err(error) => format!("Could not enable diagnostics: {error}"),
+        };
     }
 
     fn begin_history(&mut self) {
@@ -964,9 +1034,12 @@ impl App {
             ("i", "import (Remmina/.rdp/dir)"),
             ("x", "export to .rdp"),
             ("s", "status"),
+            ("L", "toggle diagnostic logging"),
             ("h", "connection history"),
             ("D", "deep-test credentials"),
-            ("p", "set / clear password"),
+            ("p", "set / clear main password"),
+            ("g", "set / clear gateway password"),
+            ("T", "review changed certificate"),
             ("t", "reachability test"),
             ("?", "this help"),
             ("q, Esc", "quit"),
@@ -991,49 +1064,87 @@ impl App {
         let Some(profile) = self.current().cloned() else {
             return;
         };
-        self.status = match test_profile(&profile, TEST_TIMEOUT) {
-            Ok(()) => format!("{} is reachable", profile.name),
-            Err(error) => format!("{}: {error}", profile.name),
-        };
+        if self.background_busy {
+            self.status = "A connection check is already running.".into();
+            return;
+        }
+        self.background_busy = true;
+        self.status = format!("Testing {}…", profile.name);
+        let sender = self.background_tx.clone();
+        std::thread::spawn(move || {
+            let status = match test_profile(&profile, TEST_TIMEOUT) {
+                Ok(()) => format!("{} is reachable", profile.name),
+                Err(error) => format!("{}: {error}", profile.name),
+            };
+            let _ = sender.send(status);
+        });
     }
 
     fn deep_test(&mut self) {
         let Some(profile) = self.current().cloned() else {
             return;
         };
-        self.run_deep_test(&profile, false);
-    }
-
-    fn run_deep_test(&mut self, profile: &Profile, acknowledged: bool) {
-        let store = SystemCredentialStore::new(self.config_root.as_path());
-        match crate::session::deep_test_profile(profile, &store, &state_dir(), acknowledged) {
-            // First deep-test of this profile: confirm the one-time warning.
-            Ok(crate::session::DeepTest::NeedsAcknowledgement) => {
-                self.mode = Mode::Prompt {
-                    label: format!("{} Deep-test {}? type yes", DEEP_TEST_WARNING, profile.name),
-                    input: String::new(),
-                    action: PromptAction::ConfirmDeepTest(profile.id),
-                };
-            }
-            Ok(outcome) => {
-                self.status = format!("{}: {}", profile.name, deep_test_message(outcome));
-            }
-            Err(error) => self.status = format!("{}: deep-test failed: {error}", profile.name),
+        if deep_test_requires_acknowledgement(&profile, &state_dir()) {
+            self.mode = Mode::Prompt {
+                label: format!("{} Deep-test {}? type yes", DEEP_TEST_WARNING, profile.name),
+                input: String::new(),
+                action: PromptAction::ConfirmDeepTest(profile.id),
+            };
+        } else {
+            self.run_deep_test(profile, false);
         }
     }
 
-    fn begin_password(&mut self) {
-        let Some(name) = self.current().map(|profile| profile.name.clone()) else {
+    fn run_deep_test(&mut self, profile: Profile, acknowledged: bool) {
+        if self.background_busy {
+            self.status = "A connection check is already running.".into();
+            return;
+        }
+        self.background_busy = true;
+        self.status = format!("Deep-testing {}…", profile.name);
+        let sender = self.background_tx.clone();
+        let config_root = self.config_root.clone();
+        let state_root = state_dir();
+        std::thread::spawn(move || {
+            let store = SystemCredentialStore::new(config_root);
+            let status = match crate::session::deep_test_profile(
+                &profile,
+                &store,
+                &state_root,
+                acknowledged,
+            ) {
+                Ok(outcome) => format!("{}: {}", profile.name, deep_test_message(outcome)),
+                Err(error) => format!("{}: deep-test failed: {error}", profile.name),
+            };
+            let _ = sender.send(status);
+        });
+    }
+
+    fn begin_password(&mut self, slot: CredentialSlot) {
+        let Some(profile) = self.current() else {
             return;
         };
-        self.mode = Mode::Password(String::new());
+        if slot == CredentialSlot::Gateway && !matches!(profile.route, Route::RdGateway { .. }) {
+            self.status = "Set this profile's route to an RD Gateway first.".into();
+            return;
+        }
+        let name = profile.name.clone();
+        self.mode = Mode::Password {
+            slot,
+            input: Zeroizing::new(String::new()),
+        };
+        let label = if slot == CredentialSlot::Main {
+            "Password"
+        } else {
+            "Gateway password"
+        };
         self.status =
-            format!("Password for {name} — Enter to save, empty Enter to clear, Esc to cancel");
+            format!("{label} for {name} — Enter to save, empty Enter to clear, Esc to cancel");
     }
 
     fn commit_password(&mut self) {
-        let password = match &self.mode {
-            Mode::Password(input) => input.clone(),
+        let (slot, password) = match &self.mode {
+            Mode::Password { slot, input } => (*slot, input.to_string()),
             _ => return,
         };
         self.mode = Mode::Browsing;
@@ -1043,131 +1154,99 @@ impl App {
         let name = self.profiles[index].name.clone();
         if password.is_empty() {
             // Empty = clear any saved password (parity with `credential clear`).
-            self.status = match self.clear_password(index) {
+            self.status = match self.clear_password(index, slot) {
                 Ok(true) => format!("Cleared the password for {name}"),
                 Ok(false) => format!("{name} had no saved password"),
                 Err(error) => format!("Could not clear password: {error}"),
             };
             return;
         }
-        self.status = match self.save_password(index, &password) {
+        self.status = match self.save_password(index, slot, &password) {
             Ok(()) => format!("Saved a password for {name}"),
             Err(error) => format!("Could not save password: {error}"),
         };
     }
 
-    fn clear_password(&mut self, index: usize) -> Result<bool, String> {
-        let mut profile = self.profiles[index].clone();
-        let Some(reference) = profile.credential.take() else {
-            return Ok(false);
-        };
-        self.store()
-            .upsert(profile.clone())
-            .map_err(|error| error.to_string())?;
+    fn clear_password(&mut self, index: usize, slot: CredentialSlot) -> Result<bool, String> {
+        let (profile, cleared) = operations::clear_password(
+            &self.store(),
+            self.config_root.as_path(),
+            self.profiles[index].clone(),
+            slot,
+        )?;
         self.profiles[index] = profile;
-        forget_encrypted(self.config_root.as_path(), reference);
-        Ok(true)
+        Ok(cleared)
     }
 
-    fn save_password(&mut self, index: usize, password: &str) -> Result<(), String> {
-        let reference = store_encrypted_password(
+    fn save_password(
+        &mut self,
+        index: usize,
+        slot: CredentialSlot,
+        password: &str,
+    ) -> Result<(), String> {
+        let profile = operations::replace_password(
+            &self.store(),
             self.config_root.as_path(),
-            &SecretString::from(password.to_owned()),
-        )
-        .map_err(|error| error.to_string())?;
-        let mut profile = self.profiles[index].clone();
-        let previous = profile.credential.replace(reference);
-        self.store()
-            .upsert(profile.clone())
-            .map_err(|error| error.to_string())?;
+            self.profiles[index].clone(),
+            slot,
+            password,
+        )?;
         // Keep the in-memory profile consistent so the next connect uses it.
         self.profiles[index] = profile;
-        if let Some(previous) = previous {
-            forget_encrypted(self.config_root.as_path(), previous);
-        }
         Ok(())
     }
 
-    fn draw(&mut self, frame: &mut ratatui::Frame) {
-        let areas =
-            Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(frame.area());
-
-        if let Mode::Editing(form) = &self.mode {
-            let items: Vec<ListItem> = FIELDS
-                .iter()
-                .enumerate()
-                .map(|(index, &field)| {
-                    let value = if index == form.field && form.editing_text.is_some() {
-                        format!("{}_", form.editing_text.as_deref().unwrap_or(""))
-                    } else {
-                        form.display_value(field)
-                    };
-                    ListItem::new(Line::from(format!("{:<14} {value}", field.label())))
-                })
-                .collect();
-            let title = if form.target.is_some() {
-                " edit profile "
-            } else {
-                " add profile "
-            };
-            let list = List::new(items)
-                .block(Block::bordered().title(title))
-                .highlight_symbol("> ")
-                .highlight_style(Style::new().reversed());
-            // A local ListState keeps the highlighted field scrolled into view.
-            let mut state = ListState::default();
-            state.select(Some(form.field));
-            frame.render_stateful_widget(list, areas[0], &mut state);
-        } else if let Mode::Status(text) = &self.mode {
-            let text = text.clone();
-            frame.render_widget(
-                Paragraph::new(text).block(Block::bordered().title(" status ")),
-                areas[0],
-            );
-        } else {
-            let items: Vec<ListItem> = self
-                .visible
-                .iter()
-                .map(|&index| {
-                    let profile = &self.profiles[index];
-                    ListItem::new(Line::from(format!(
-                        "{}    {}",
-                        profile.name, profile.endpoint
-                    )))
-                })
-                .collect();
-            let list = List::new(items)
-                .block(Block::bordered().title(" rdp-tui — profiles "))
-                .highlight_symbol("> ")
-                .highlight_style(Style::new().reversed());
-            frame.render_stateful_widget(list, areas[0], &mut self.selected);
-        }
-
-        let (title, body) = match &self.mode {
-            Mode::Browsing => (
-                " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · h history · t test · D deep-test · p pass · ? help · q quit ".to_string(),
-                self.status.clone(),
-            ),
-            Mode::Password(input) => (
-                " typing password · Enter save · Esc cancel ".to_string(),
-                format!("Password: {}", "*".repeat(input.chars().count())),
-            ),
-            Mode::Prompt { label, input, .. } => (
-                " Enter confirm · Esc cancel ".to_string(),
-                format!("{label}: {input}"),
-            ),
-            Mode::Status(_) => (" any key to return ".to_string(), String::new()),
-            Mode::Editing(form) => (
-                if form.editing_text.is_some() {
-                    " typing · Enter set · Esc cancel field ".to_string()
-                } else {
-                    " ↑/↓ field · Enter/Space edit · A accept · Esc cancel ".to_string()
-                },
-                form.error.clone().unwrap_or_else(|| self.status.clone()),
-            ),
+    fn begin_certificate_mismatch(&mut self) {
+        let Some(profile) = self.current() else {
+            return;
         };
-        let footer = Paragraph::new(body).block(Block::bordered().title(title));
-        frame.render_widget(footer, areas[1]);
+        match crate::freerdp::certificate::read_mismatch(&state_dir(), profile.id) {
+            Ok(Some(mismatch)) => self.mode = Mode::CertificateMismatch(mismatch),
+            Ok(None) => self.status = "No changed certificate is awaiting confirmation.".into(),
+            Err(error) => self.status = format!("Could not read certificate status: {error}"),
+        }
+    }
+
+    fn handle_certificate_mismatch(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('T') => {
+                let Mode::CertificateMismatch(mismatch) = &self.mode else {
+                    return;
+                };
+                let fingerprint = mismatch.presented_sha256.clone();
+                let profile_id = mismatch.profile_id;
+                let Some(profile) = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == profile_id)
+                    .cloned()
+                else {
+                    self.mode = Mode::Browsing;
+                    self.status = "The profile no longer exists.".into();
+                    return;
+                };
+                self.mode = Mode::Browsing;
+                self.status = match operations::trust_certificate_mismatch(
+                    &self.store(),
+                    self.config_root.as_path(),
+                    &state_dir(),
+                    profile,
+                    &fingerprint,
+                ) {
+                    Ok(_) => "Certificate approved; reconnect to pin the replacement.".into(),
+                    Err(error) => format!("Could not approve certificate: {error}"),
+                };
+            }
+            KeyCode::Char('q' | 'Q') | KeyCode::Esc => {
+                self.mode = Mode::Browsing;
+                self.status = "Certificate change left untrusted.".into();
+            }
+            _ => {}
+        }
+    }
+
+    fn draw(&mut self, frame: &mut ratatui::Frame) {
+        view::draw(self, frame);
     }
 }
 
@@ -1190,12 +1269,6 @@ fn blank_profile() -> Profile {
 
 /// Two profiles are duplicates if they match on everything but their id — the
 /// same dedup rule the CLI importer uses, so re-importing is idempotent.
-fn same_except_id(current: &Profile, incoming: &Profile) -> bool {
-    let mut incoming = incoming.clone();
-    incoming.id = current.id;
-    current == &incoming
-}
-
 fn profile_matches(profile: &Profile, query: &str) -> bool {
     profile.name.to_lowercase().contains(query)
         || profile.endpoint.to_string().to_lowercase().contains(query)
@@ -1205,7 +1278,7 @@ fn profile_matches(profile: &Profile, query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, EditForm, FIELDS, Field, Mode, PromptAction};
+    use super::{App, CredentialSlot, EditForm, FIELDS, Field, Mode, PromptAction};
     use crate::config::ConfigStore;
     use crate::model::{
         CertificatePolicy, DeviceConfig, DisplayConfig, Endpoint, GraphicsMode, IdentityConfig,
@@ -1287,7 +1360,7 @@ mod tests {
     #[test]
     fn password_mode_masks_the_typed_input() {
         let mut app = app_with(&["Anima"]);
-        app.begin_password();
+        app.begin_password(CredentialSlot::Main);
         for character in "secret".chars() {
             app.handle_password(press(KeyCode::Char(character)));
         }
@@ -1365,8 +1438,8 @@ mod tests {
             PathBuf::from("/usr/bin/rdp-tui"),
             config_root,
         );
-        app.begin_password();
-        assert!(matches!(app.mode, Mode::Password(_)));
+        app.begin_password(CredentialSlot::Main);
+        assert!(matches!(app.mode, Mode::Password { .. }));
         for character in "hunter2".chars() {
             app.handle_password(press(KeyCode::Char(character)));
         }
@@ -1382,7 +1455,7 @@ mod tests {
         let (dir, mut app) = app_on_disk(&["Sample"]);
         let id = app.profiles[0].id;
 
-        app.begin_password();
+        app.begin_password(CredentialSlot::Main);
         for character in "hunter2".chars() {
             app.handle_password(press(KeyCode::Char(character)));
         }
@@ -1390,7 +1463,7 @@ mod tests {
         assert!(app.profiles[0].credential.is_some());
 
         // Re-open and submit nothing: the saved password is cleared.
-        app.begin_password();
+        app.begin_password(CredentialSlot::Main);
         app.handle_password(press(KeyCode::Enter));
         assert!(app.profiles[0].credential.is_none());
 
@@ -1472,7 +1545,7 @@ mod tests {
     #[test]
     fn cloning_duplicates_the_selected_profile_without_its_credential() {
         let (dir, mut app) = app_on_disk(&["Sample"]);
-        app.begin_password();
+        app.begin_password(CredentialSlot::Main);
         for character in "hunter2".chars() {
             app.handle_password(press(KeyCode::Char(character)));
         }

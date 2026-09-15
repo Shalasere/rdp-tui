@@ -2,14 +2,13 @@
 
 A small terminal UI for saved [FreeRDP](https://www.freerdp.com/) connections. It launches a FreeRDP client; it does not attempt to draw an RDP desktop inside the terminal.
 
-> **0.1 alpha:** The direct-RDP workflow is ready for daily testing. Wayland SDL
-> and SSH-tunnel configuration are experimental; the SSH tunnel launcher is not
-> implemented yet.
+> **0.2 alpha:** The Rust CLI/TUI supports direct, RD Gateway, and supervised SSH
+> tunnel connections. Wayland SDL remains experimental and can fall back to X11.
 
 ## Features
 
 - Keyboard-first profile selection and editing
-- Profiles stored at `~/.config/rdp-tui/profiles.json` with owner-only permissions
+- Rust profiles stored at `~/.config/rdp-tui/profiles.toml` with locked, atomic writes
 - Fullscreen, clipboard, audio, certificate, domain, and extra FreeRDP option controls
 - Passwords saved by default in an encrypted local file, separate from the profile JSON and supplied through FreeRDP's askpass hook (not the command line)
 - Import Remmina `.remmina`, standard `.rdp`, or native JSON backup profiles; export a selected profile as a password-free `.rdp` file
@@ -24,8 +23,14 @@ cd rdp-tui
 ./rdp-tui
 ```
 
-For an installed `rdp-tui` command instead, create a virtual environment and
-install the project with `python -m venv .venv && .venv/bin/pip install -e .`.
+The repository currently includes two entry points: `./rdp-tui` and `make run`
+start the legacy Python UI, while the Rust implementation runs with:
+
+```sh
+cargo run --release -- tui
+# CLI example
+cargo run --release -- list
+```
 
 On Arch, FreeRDP 3 provides `xfreerdp3`; older releases and some other
 distributions use `xfreerdp`. rdp-tui detects either, preferring `xfreerdp3`.
@@ -50,9 +55,9 @@ Leave **Domain** empty for a local account; rdp-tui passes that as an explicit e
 
 ## Development
 
-The daily-use launcher remains the Python implementation during the Rust
-rewrite. The Rust crate currently provides the architecture-contract validator;
-its frontend is intentionally not active yet.
+Both the legacy Python frontend and the Rust rewrite remain tested. New core
+work is in Rust; the Python launcher is retained during migration rather than
+silently changing the behavior of `./rdp-tui`.
 
 ```sh
 make setup
@@ -77,6 +82,22 @@ the selected connection's effective client, renderer, display mode, password
 storage state, and last outcome. A credential-free copy of that last outcome is
 kept in `~/.local/state/rdp-tui/last-session.json` so it survives a restart;
 inspect the raw output with `tail -n 100 ~/.local/state/rdp-tui/rdp-tui.log`.
+
+### Rust frontend logging
+
+The Rust frontend creates no application log unless the user opts in. In the
+TUI, press `L` to toggle diagnostics at
+`~/.local/state/rdp-tui/diagnostics.log`; the setting applies to the current
+TUI process and connections it launches. For a CLI command or a custom path,
+set `RDP_TUI_LOG`:
+
+```sh
+RDP_TUI_LOG="$HOME/.local/state/rdp-tui/diagnostics.log" rdp-tui test <profile-id>
+```
+
+The file is owner-readable only. It records preflight endpoints, failure
+categories, and kernel socket errors; credentials, FreeRDP command lines, and
+secret environment values must never be written to it.
 
 ## Advanced RDP settings
 
@@ -114,8 +135,9 @@ When FreeRDP reports that a pinned certificate changed, rdp-tui returns to the
 terminal and shows both SHA-256 fingerprints. Press `T` only after confirming
 the remote PC was reinstalled, reset, or renewed its RDP certificate. rdp-tui
 then archives the old pin under
-`~/.config/rdp-tui/certificate-backups/`, switches that profile to TOFU, and
-asks you to reconnect. No manual FreeRDP `.pem` editing is required.
+`~/.local/state/rdp-tui/certificate-backups/`, switches that profile to TOFU,
+and asks you to reconnect. Rust approval must match the exact fingerprint
+captured by the failed attempt. No manual FreeRDP `.pem` editing is required.
 
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.
 
@@ -129,8 +151,7 @@ on HTTPS port 443 by default (or the port included in its host field).
 
 ## SSH tunnels
 
-**Advanced RDP settings → SSH tunnel** explains the connection path and lets
-you select an existing SSH config host (for example `work-jump`). It relies on
-`~/.ssh/config`, your SSH agent, and keys; no SSH password is collected or
-stored. The tunnel launcher itself is the next roadmap item, so this menu
-currently records the intended jump host only.
+Set the route to an existing SSH config host (for example `ssh:work-jump`). It
+relies on `~/.ssh/config`, your SSH agent, and keys; no SSH password is collected
+or stored. The Rust supervisor retains and identity-checks the tunnel for the
+whole connection, then terminates and reaps it when FreeRDP exits.

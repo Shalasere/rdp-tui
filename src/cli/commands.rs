@@ -3,7 +3,7 @@
 use crate::ProfileStore;
 use crate::config::ConfigStore;
 use crate::config::migrate::import_python_profiles;
-use crate::credentials::{SystemCredentialStore, forget_encrypted, store_encrypted_password};
+use crate::credentials::SystemCredentialStore;
 use crate::freerdp::certificate;
 use crate::freerdp::discover::discover;
 use crate::model::fields;
@@ -11,10 +11,12 @@ use crate::model::{
     CertificatePolicy, ConnectionPlan, DeviceConfig, DisplayConfig, Endpoint, GraphicsMode,
     IdentityConfig, NetworkProfile, Profile, ProfileId, Renderer, Route, SecurityConfig,
 };
+use crate::operations::{self, CredentialSlot};
 use crate::planner::plan;
 use crate::session::{connect_profile, test_profile};
-use secrecy::SecretString;
+use secrecy::zeroize::Zeroizing;
 use std::fmt::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -42,10 +44,16 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [command, id] if command == "history" => history(&store, Some(id)),
         [command, id] if command == "connect" => connect(&store, id),
         [command, sub, id] if command == "credential" && sub == "set" => {
-            credential_set(&store, config_root, id)
+            credential_set(&store, config_root, id, CredentialSlot::Main)
         }
         [command, sub, id] if command == "credential" && sub == "clear" => {
-            credential_clear(&store, config_root, id)
+            credential_clear(&store, config_root, id, CredentialSlot::Main)
+        }
+        [command, sub, id, slot] if command == "credential" && sub == "set" => {
+            credential_set(&store, config_root, id, parse_credential_slot(slot)?)
+        }
+        [command, sub, id, slot] if command == "credential" && sub == "clear" => {
+            credential_clear(&store, config_root, id, parse_credential_slot(slot)?)
         }
         [command, sub, id] if command == "certificate" && sub == "show" => {
             certificate_show(&store, config_root, id)
@@ -68,7 +76,7 @@ pub fn run(arguments: &[String], config_root: &PathBuf) -> Result<String, String
         [command, id] if command == "delete" => delete_command(&store, config_root, id),
         [command, id] if command == "clone" => clone_command(&store, id),
         [command, id, field, new_value] if command == "set" => {
-            set_command(&store, id, field, new_value)
+            set_command(&store, config_root, id, field, new_value)
         }
         [command, path] if command == "import" => import_command(&store, path),
         [command, id, path] if command == "export" => export_command(&store, id, path),
@@ -130,10 +138,15 @@ fn connect(store: &ProfileStore, value: &str) -> Result<String, String> {
     ))
 }
 
-fn credential_set(store: &ProfileStore, config_root: &Path, value: &str) -> Result<String, String> {
+fn credential_set(
+    store: &ProfileStore,
+    config_root: &Path,
+    value: &str,
+    slot: CredentialSlot,
+) -> Result<String, String> {
     let profile = load_profile(store, value)?;
     let name = profile.name.clone();
-    let mut password = String::new();
+    let mut password = Zeroizing::new(String::new());
     std::io::stdin()
         .read_line(&mut password)
         .map_err(|error| error.to_string())?;
@@ -141,23 +154,33 @@ fn credential_set(store: &ProfileStore, config_root: &Path, value: &str) -> Resu
     if password.is_empty() {
         return Err("no password was provided on stdin".into());
     }
-    set_profile_credential(store, config_root, profile, password)?;
-    Ok(format!("credential: stored a password for {name}\n"))
+    operations::replace_password(store, config_root, profile, slot, password)?;
+    Ok(format!(
+        "credential: stored the {} password for {name}\n",
+        slot_name(slot)
+    ))
 }
 
 fn credential_clear(
     store: &ProfileStore,
     config_root: &Path,
     value: &str,
+    slot: CredentialSlot,
 ) -> Result<String, String> {
-    let mut profile = load_profile(store, value)?;
-    let Some(reference) = profile.credential.take() else {
-        return Ok(format!("credential: {} had none to clear\n", profile.name));
-    };
+    let profile = load_profile(store, value)?;
     let name = profile.name.clone();
-    store.upsert(profile).map_err(|error| error.to_string())?;
-    forget_encrypted(config_root, reference);
-    Ok(format!("credential: cleared the password for {name}\n"))
+    let (_, cleared) = operations::clear_password(store, config_root, profile, slot)?;
+    Ok(if cleared {
+        format!(
+            "credential: cleared the {} password for {name}\n",
+            slot_name(slot)
+        )
+    } else {
+        format!(
+            "credential: {name} had no {} password to clear\n",
+            slot_name(slot)
+        )
+    })
 }
 
 /// Store `password` in the encrypted-file backend and pin the resulting concrete
@@ -170,17 +193,26 @@ fn credential_clear(
 pub fn set_profile_credential(
     store: &ProfileStore,
     config_root: &Path,
-    mut profile: Profile,
+    profile: Profile,
     password: &str,
 ) -> Result<(), String> {
-    let reference = store_encrypted_password(config_root, &SecretString::from(password.to_owned()))
-        .map_err(|error| error.to_string())?;
-    let previous = profile.credential.replace(reference);
-    store.upsert(profile).map_err(|error| error.to_string())?;
-    if let Some(previous) = previous {
-        forget_encrypted(config_root, previous);
+    operations::replace_password(store, config_root, profile, CredentialSlot::Main, password)
+        .map(|_| ())
+}
+
+fn parse_credential_slot(value: &str) -> Result<CredentialSlot, String> {
+    match value {
+        "main" => Ok(CredentialSlot::Main),
+        "gateway" => Ok(CredentialSlot::Gateway),
+        _ => Err("credential slot must be 'main' or 'gateway'".into()),
     }
-    Ok(())
+}
+
+const fn slot_name(slot: CredentialSlot) -> &'static str {
+    match slot {
+        CredentialSlot::Main => "main",
+        CredentialSlot::Gateway => "gateway",
+    }
 }
 
 fn certificate_policy(store: &ProfileStore, value: &str, policy: &str) -> Result<String, String> {
@@ -203,12 +235,17 @@ fn certificate_show(
     let (host, port) = endpoint_host_port(&profile);
     let pin = certificate::pin_path(&freerdp_config_dir(config_root), &host, port);
     let pinned = certificate::fingerprint(&pin).map_err(|error| error.to_string())?;
+    let pending =
+        certificate::read_mismatch(&state_dir(), profile.id).map_err(|error| error.to_string())?;
     Ok(format!(
-        "profile: {}\nendpoint: {}\npolicy: {:?}\npinned: {}\n",
+        "profile: {}\nendpoint: {}\npolicy: {:?}\npinned: {}\npresented: {}\n",
         profile.name,
         profile.endpoint,
         profile.security.certificate_policy,
         pinned.as_deref().unwrap_or("none"),
+        pending
+            .as_ref()
+            .map_or("none", |mismatch| mismatch.presented_sha256.as_str()),
     ))
 }
 
@@ -241,21 +278,50 @@ fn certificate_restore(
 ) -> Result<String, String> {
     let profile = load_profile(store, value)?;
     let (host, port) = endpoint_host_port(&profile);
-    if !backup.starts_with(&format!("{host}_{port}.pem.")) {
+    let backup_path = Path::new(backup);
+    if backup_path.file_name().and_then(std::ffi::OsStr::to_str) != Some(backup)
+        || !backup.starts_with(&format!("{host}_{port}.pem."))
+        || backup_path.extension().and_then(std::ffi::OsStr::to_str) != Some("bak")
+    {
         return Err(format!(
             "backup {backup} does not belong to {}",
             profile.name
         ));
     }
     let source = certificate_backups_dir().join(backup);
-    if !source.exists() {
-        return Err(format!("backup {backup} was not found"));
+    match std::fs::symlink_metadata(&source) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(format!("backup {backup} is not a regular file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("backup {backup} was not found"));
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    if certificate::fingerprint(&source)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err(format!("backup {backup} is not a valid PEM certificate"));
     }
     let pin = certificate::pin_path(&freerdp_config_dir(config_root), &host, port);
     if let Some(parent) = pin.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    std::fs::rename(&source, &pin).map_err(|error| error.to_string())?;
+    let current = match certificate::fingerprint(&pin).map_err(|error| error.to_string())? {
+        Some(fingerprint) => Some(
+            certificate::archive(&pin, &certificate_backups_dir(), Some(&fingerprint))
+                .map_err(|error| error.to_string())?,
+        ),
+        None => None,
+    };
+    if let Err(error) = std::fs::rename(&source, &pin) {
+        if let Some(current) = current {
+            let _ = std::fs::rename(current, &pin);
+        }
+        return Err(error.to_string());
+    }
+    std::fs::set_permissions(&pin, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| error.to_string())?;
     Ok(format!(
         "restored {backup} as the pinned certificate for {}\n",
         profile.name
@@ -268,71 +334,38 @@ fn certificate_trust(
     value: &str,
     fingerprint: &str,
 ) -> Result<String, String> {
-    let normalized = fingerprint.replace(':', "").to_ascii_uppercase();
-    if normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("a full 64-hex-character SHA-256 fingerprint is required".into());
-    }
-    let mut profile = load_profile(store, value)?;
+    let profile = load_profile(store, value)?;
     let name = profile.name.clone();
-    let (host, port) = endpoint_host_port(&profile);
-    let pin = certificate::pin_path(&freerdp_config_dir(config_root), &host, port);
-    // Archive the old pin so the next connection re-pins the trusted certificate.
-    if certificate::fingerprint(&pin)
-        .map_err(|error| error.to_string())?
-        .is_some()
-    {
-        certificate::archive(&pin, &certificate_backups_dir(), None)
-            .map_err(|error| error.to_string())?;
-    }
-    profile.security.certificate_policy = CertificatePolicy::Tofu;
-    store.upsert(profile).map_err(|error| error.to_string())?;
+    let mismatch = operations::trust_certificate_mismatch(
+        store,
+        config_root,
+        &state_dir(),
+        profile,
+        fingerprint,
+    )?;
     Ok(format!(
-        "trusting {normalized} for {name}; reconnect to pin it (policy set to tofu)\n"
+        "trusting {} for {name}; reconnect to pin it (policy set to tofu)\n",
+        mismatch.presented_sha256
     ))
 }
 
 fn freerdp_config_dir(config_root: &Path) -> PathBuf {
-    // config_root is $XDG_CONFIG_HOME/rdp-tui; FreeRDP pins live under $XDG_CONFIG_HOME/freerdp.
-    config_root
-        .parent()
-        .map_or_else(|| PathBuf::from("freerdp"), |base| base.join("freerdp"))
+    crate::paths::freerdp_config_root(config_root)
 }
 
 fn certificate_backups_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("rdp-tui")
-        .join("certificate-backups")
+    crate::paths::certificate_backups_dir()
 }
 
 fn endpoint_host_port(profile: &Profile) -> (String, u16) {
-    let text = profile.endpoint.to_string();
-    match text.rsplit_once(':') {
-        Some((host, port)) => (host.to_string(), port.parse().unwrap_or(3389)),
-        None => (text, 3389),
-    }
+    (profile.endpoint.host.to_string(), profile.endpoint.port)
 }
 
 fn import_command(store: &ProfileStore, path: &str) -> Result<String, String> {
-    let profiles = crate::config::import::import_path(Path::new(path))?;
-    let existing = store.list().map_err(|error| error.to_string())?;
-    let (mut added, mut skipped, mut failed) = (0_usize, 0_usize, 0_usize);
-    for profile in profiles {
-        if existing
-            .iter()
-            .any(|current| same_except_id(current, &profile))
-        {
-            skipped += 1;
-        } else if store.upsert(profile).is_ok() {
-            added += 1;
-        } else {
-            failed += 1;
-        }
-    }
+    let counts = operations::import_profiles(store, Path::new(path))?;
     Ok(format!(
-        "import: {added} added, {skipped} skipped, {failed} failed\n"
+        "import: {} added, {} updated, {} skipped, {} failed\n",
+        counts.added, counts.updated, counts.skipped, counts.failed
     ))
 }
 
@@ -379,13 +412,7 @@ fn add_command(store: &ProfileStore, name: &str, host: &str) -> Result<String, S
 fn delete_command(store: &ProfileStore, config_root: &Path, value: &str) -> Result<String, String> {
     let profile = load_profile(store, value)?;
     let name = profile.name.clone();
-    // Forget the pinned secret before removing the profile that references it.
-    if let Some(reference) = profile.credential {
-        forget_encrypted(config_root, reference);
-    }
-    store
-        .remove(profile.id)
-        .map_err(|error| error.to_string())?;
+    operations::delete_profile(store, config_root, &profile)?;
     Ok(format!("deleted {name}\n"))
 }
 
@@ -395,7 +422,7 @@ fn clone_command(store: &ProfileStore, value: &str) -> Result<String, String> {
     profile.name = format!("{} (copy)", profile.name);
     // A clone starts without the source's secret: the CredentialRef points at one
     // stored file, and sharing it would let deleting either profile forget both.
-    profile.credential = None;
+    operations::strip_credentials(&mut profile);
     let (id, name) = (profile.id, profile.name.clone());
     store.upsert(profile).map_err(|error| error.to_string())?;
     Ok(format!("cloned to {name} ({id})\n"))
@@ -403,6 +430,7 @@ fn clone_command(store: &ProfileStore, value: &str) -> Result<String, String> {
 
 fn set_command(
     store: &ProfileStore,
+    config_root: &Path,
     value: &str,
     field: &str,
     new_value: &str,
@@ -417,6 +445,14 @@ fn set_command(
         }
         "username" => new_value.clone_into(&mut profile.identity.username),
         "domain" => new_value.clone_into(&mut profile.identity.domain),
+        "gateway-username" => match &mut profile.route {
+            Route::RdGateway { username, .. } => new_value.clone_into(username),
+            _ => return Err("set route to gateway:<host> before setting gateway-username".into()),
+        },
+        "gateway-domain" => match &mut profile.route {
+            Route::RdGateway { domain, .. } => new_value.clone_into(domain),
+            _ => return Err("set route to gateway:<host> before setting gateway-domain".into()),
+        },
         "fullscreen" => profile.display.fullscreen = fields::parse_bool(new_value)?,
         "renderer" => {
             profile.display.renderer = Renderer::from_token(new_value)
@@ -452,30 +488,24 @@ fn set_command(
         other => {
             return Err(format!(
                 "unknown field '{other}' (name | host | username | domain | fullscreen | \
-                 renderer | resolution | route | multimon | span-monitors | smart-sizing | \
+                 renderer | resolution | route | gateway-username | gateway-domain | multimon | span-monitors | smart-sizing | \
                  dynamic-resolution | scale | color-depth | clipboard | audio | microphone | \
                  printers | graphics | admin-session | network)"
             ));
         }
     }
     let name = profile.name.clone();
-    store.upsert(profile).map_err(|error| error.to_string())?;
+    operations::save_profile(store, config_root, profile)?;
     Ok(format!("set {field} on {name}\n"))
-}
-
-fn same_except_id(current: &Profile, incoming: &Profile) -> bool {
-    let mut incoming = incoming.clone();
-    incoming.id = current.id;
-    current == &incoming
 }
 
 fn migrate_python(store: &ProfileStore, source: &std::path::Path) -> Result<String, String> {
     let text = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
     let document = import_python_profiles(&text).map_err(|error| error.to_string())?;
     let count = document.profiles.len();
-    for profile in document.profiles {
-        store.upsert(profile).map_err(|error| error.to_string())?;
-    }
+    store
+        .merge(document.profiles)
+        .map_err(|error| error.to_string())?;
     Ok(format!(
         "migrated: {count} profile(s); secrets were not migrated\n"
     ))
@@ -499,19 +529,17 @@ fn doctor() -> String {
                 .expect("writing to a String cannot fail"),
         }
     }
-    if let Some(dir) = crate::session::record::sessions_dir() {
-        let sessions = crate::session::scan_sessions(&dir);
-        if sessions.is_empty() {
-            writeln!(output, "sessions: none active").expect("writing to a String cannot fail");
-        } else {
-            for status in sessions {
-                writeln!(
-                    output,
-                    "session {}: {:?} (profile {})",
-                    status.record.session_id, status.health, status.record.profile_id
-                )
-                .expect("writing to a String cannot fail");
-            }
+    let sessions = crate::session::scan_sessions(&crate::session::record::sessions_dir());
+    if sessions.is_empty() {
+        writeln!(output, "sessions: none active").expect("writing to a String cannot fail");
+    } else {
+        for status in sessions {
+            writeln!(
+                output,
+                "session {}: {:?} (profile {})",
+                status.record.session_id, status.health, status.record.profile_id
+            )
+            .expect("writing to a String cannot fail");
         }
     }
     output
@@ -638,6 +666,10 @@ fn deep_test(
                 profile.name
             )
         }
+        DeepTest::Indeterminate => format!(
+            "deep-test: {} — result indeterminate; credentials were not confirmed\n",
+            profile.name
+        ),
         DeepTest::NotSupported => format!(
             "deep-test: {} — auth-only is not supported by this FreeRDP build\n",
             profile.name
@@ -652,15 +684,11 @@ fn deep_test(
 }
 
 fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("rdp-tui")
+    crate::paths::state_root()
 }
 
 const fn usage() -> &'static str {
-    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> [--yes] | connect <id> | add <name> <host> | set <id> <field> <value> | clone <id> | delete <id> | credential set|clear <id> | certificate policy|show|trust|backups|restore <id> ... | import <path> | export <id> <path> | history [<id>] | config-paths | info | doctor | migrate python [profiles.json]]"
+    "usage: rdp-tui [list | show <id> | inspect <id> | validate | test <id> | deep-test <id> [--yes] | connect <id> | add <name> <host> | set <id> <field> <value> | clone <id> | delete <id> | credential set|clear <id> [main|gateway] | certificate policy|show|trust|backups|restore <id> ... | import <path> | export <id> <path> | history [<id>] | config-paths | info | doctor | migrate python [profiles.json]]"
 }
 
 #[cfg(test)]
@@ -757,15 +785,15 @@ mod tests {
         assert!(matches!(profile.route, Route::Direct));
 
         let id = profile.id.to_string();
-        super::set_command(&store, &id, "username", "operator").unwrap();
-        super::set_command(&store, &id, "host", "10.0.0.9:9833").unwrap();
-        super::set_command(&store, &id, "resolution", "1920x1080").unwrap();
-        super::set_command(&store, &id, "route", "ssh:jump.example").unwrap();
-        super::set_command(&store, &id, "multimon", "yes").unwrap();
-        super::set_command(&store, &id, "scale", "140").unwrap();
-        super::set_command(&store, &id, "audio", "off").unwrap();
+        super::set_command(&store, dir.path(), &id, "username", "operator").unwrap();
+        super::set_command(&store, dir.path(), &id, "host", "10.0.0.9:9833").unwrap();
+        super::set_command(&store, dir.path(), &id, "resolution", "1920x1080").unwrap();
+        super::set_command(&store, dir.path(), &id, "route", "ssh:jump.example").unwrap();
+        super::set_command(&store, dir.path(), &id, "multimon", "yes").unwrap();
+        super::set_command(&store, dir.path(), &id, "scale", "140").unwrap();
+        super::set_command(&store, dir.path(), &id, "audio", "off").unwrap();
         // The store rejects an out-of-range scale rather than corrupting the profile.
-        assert!(super::set_command(&store, &id, "scale", "150").is_err());
+        assert!(super::set_command(&store, dir.path(), &id, "scale", "150").is_err());
 
         let saved = store.get(profile.id).unwrap().unwrap();
         assert_eq!(saved.identity.username, "operator");
@@ -776,8 +804,8 @@ mod tests {
         assert_eq!(saved.display.scale_percent, Some(140));
         assert!(!saved.devices.audio_playback);
 
-        assert!(super::set_command(&store, &id, "route", "bogus").is_err());
-        assert!(super::set_command(&store, &id, "nonesuch", "x").is_err());
+        assert!(super::set_command(&store, dir.path(), &id, "route", "bogus").is_err());
+        assert!(super::set_command(&store, dir.path(), &id, "nonesuch", "x").is_err());
     }
 
     #[test]
