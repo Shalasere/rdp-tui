@@ -163,7 +163,7 @@ fn encrypt(key: &[u8; 32], secret: &SecretString) -> Result<String, CredentialEr
     let mut nonce = [0; NONCE_LENGTH];
     getrandom::fill(&mut nonce).map_err(unavailable)?;
     let payload = cipher
-        .encrypt(Nonce::from_slice(&nonce), secret.expose_secret().as_bytes())
+        .encrypt(&Nonce::from(nonce), secret.expose_secret().as_bytes())
         .map_err(|_| CredentialError::Unavailable("credential encryption failed".into()))?;
     let mut encoded = nonce.to_vec();
     encoded.extend(payload);
@@ -178,11 +178,11 @@ fn decrypt(key: &[u8; 32], value: &str) -> Result<SecretString, CredentialError>
         .ok_or_else(|| CredentialError::Unavailable("encrypted credential is corrupt".into()))?;
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| CredentialError::Unavailable("invalid encryption key".into()))?;
-    let plain = cipher
-        .decrypt(Nonce::from_slice(nonce), payload)
-        .map_err(|_| {
-            CredentialError::Unavailable("encrypted credential cannot be decrypted".into())
-        })?;
+    let nonce = Nonce::try_from(nonce)
+        .map_err(|_| CredentialError::Unavailable("encrypted credential is corrupt".into()))?;
+    let plain = cipher.decrypt(&nonce, payload).map_err(|_| {
+        CredentialError::Unavailable("encrypted credential cannot be decrypted".into())
+    })?;
     String::from_utf8(plain)
         .map(SecretString::from)
         .map_err(|_| CredentialError::Unavailable("encrypted credential is not UTF-8".into()))
@@ -223,4 +223,19 @@ fn restrict_file(file: &File) -> Result<(), CredentialError> {
 #[allow(clippy::needless_pass_by_value)] // Accepts owned I/O and crypto errors at call sites.
 fn unavailable(error: impl ToString) -> CredentialError {
     CredentialError::Unavailable(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decrypt;
+    use secrecy::ExposeSecret;
+
+    #[test]
+    fn decrypts_credentials_written_with_aes_gcm_0_10() {
+        // Generated with aes-gcm 0.10.3, key [7; 32], nonce [3; 12], and
+        // plaintext "legacy-password" in the existing nonce + ciphertext format.
+        let encoded = "AwMDAwMDAwMDAwMDSZvEYjlRczIbMzArhCWb8Xki318ti/UDr97h4cDS7A==";
+        let secret = decrypt(&[7; 32], encoded).unwrap();
+        assert_eq!(secret.expose_secret(), "legacy-password");
+    }
 }
