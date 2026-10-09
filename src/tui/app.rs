@@ -476,7 +476,10 @@ impl App {
         }
     }
 
-    fn event_loop<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
+    fn event_loop<B: Backend<Error = io::Error>>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> io::Result<()> {
         loop {
             self.receive_background_result();
             terminal.draw(|frame| self.draw(frame))?;

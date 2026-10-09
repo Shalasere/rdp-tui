@@ -2,7 +2,7 @@
 
 use super::{App, FIELDS, Mode};
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Style, Stylize as _};
+use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 
