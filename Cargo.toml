@@ -9,7 +9,7 @@ repository = "https://github.com/Shalasere/rdp-tui"
 
 [dependencies]
 aes-gcm = "0.10.3"
-base64 = "0.22.1"
+base64 = "0.23.1"
 fs2 = "0.4.3"
 getrandom = "0.4.2"
 regex = "1.13.1"
