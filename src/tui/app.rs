@@ -19,7 +19,7 @@ use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Style, Stylize as _};
+use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use secrecy::SecretString;
@@ -434,7 +434,10 @@ impl App {
         }
     }
 
-    fn event_loop<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
+    fn event_loop<B: Backend<Error = io::Error>>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> io::Result<()> {
         loop {
             terminal.draw(|frame| self.draw(frame))?;
             let Event::Key(key) = event::read()? else {
