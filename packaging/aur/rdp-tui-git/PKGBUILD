@@ -1,0 +1,51 @@
+# shellcheck shell=bash
+# makepkg provides srcdir/pkgdir and consumes the package metadata below.
+# shellcheck disable=SC2034,SC2154
+# Maintainer: add your AUR username and contact before submission.
+pkgname=rdp-tui-git
+pkgver=0.2.0.alpha.1.r8.g96a3cc0
+pkgrel=1
+pkgdesc='Keyboard-driven FreeRDP profile manager (Rust development version)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/Shalasere/rdp-tui'
+license=('MIT')
+depends=('freerdp>=3' 'gcc-libs' 'glibc')
+makedepends=('git' 'cargo')
+optdepends=('openssh: SSH tunnel routes' 'libsecret: Secret Service password storage' 'hyprland: monitor resolution detection')
+provides=('rdp-tui')
+conflicts=('rdp-tui' 'rdp-tui-bin')
+source=("rdp-tui::git+$url")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/rdp-tui" || return
+  git describe --long --tags --abbrev=7 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+prepare() {
+  cd "$srcdir/rdp-tui" || return
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$srcdir/rdp-tui" || return
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$srcdir/rdp-tui" || return
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --all-targets
+}
+
+package() {
+  cd "$srcdir/rdp-tui" || return
+  install -Dm755 target/release/rdp-tui "$pkgdir/usr/bin/rdp-tui"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 docs/RELEASING.md "$pkgdir/usr/share/doc/$pkgname/docs/RELEASING.md"
+}

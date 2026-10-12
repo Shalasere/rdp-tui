@@ -35,6 +35,16 @@ cargo run --release -- list
 On Arch, FreeRDP 3 provides `xfreerdp3`; older releases and some other
 distributions use `xfreerdp`. rdp-tui detects either, preferring `xfreerdp3`.
 
+Linux x86_64 and ARM64 release archives are built by GitHub Actions. Version tags
+publish the Rust binaries and SHA-256 checksums on the
+[releases page](https://github.com/Shalasere/rdp-tui/releases). FreeRDP 3 must be
+installed separately. Extract the matching archive and follow its `INSTALL.txt`;
+start the interface with `rdp-tui tui`.
+
+An Arch development-package recipe is available in `packaging/aur/rdp-tui-git/`.
+It is not yet published to the AUR. See [release and packaging instructions](docs/RELEASING.md)
+for verification, release automation, and AUR submission details.
+
 Press `a` to add a connection. The selector displays separate **Nickname**,
 **Hostname / address**, and **User** columns. Use arrow keys (or `j`/`k`) to
 choose a profile, then `Enter` to connect. The profile editor shows every field
