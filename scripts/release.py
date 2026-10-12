@@ -77,6 +77,9 @@ def bundle(target, output, tag=None):
         "Secret Service password storage; hyprctl for Hyprland monitor detection.\n"
         "The archive contains the Rust frontend. FreeRDP and its graphical\n"
         "dependencies are not bundled. BUILD-INFO.json identifies the source commit.\n"
+        "Hostname lookup uses /etc/hosts and DNS, without glibc NSS plugins.\n"
+        "For names requiring an NSS plugin (e.g. nss-mdns), use an IP address\n"
+        "or a native source build such as the Arch package recipe.\n"
     )
     files = {
         "rdp-tui": (data, 0o755),

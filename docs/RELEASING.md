@@ -4,6 +4,11 @@ The Rust frontend is distributed separately from FreeRDP. Release binaries
 target Linux x86_64 and ARM64 using static musl builds; FreeRDP 3 and its display
 dependencies must be installed through the user's distribution.
 
+The portable binaries resolve names through `/etc/hosts` and DNS using musl;
+they do not load glibc NSS plugins. If a hostname relies on an NSS plugin such
+as `nss-mdns`, use its IP address or the native source-built Arch package.
+See the [musl resolver implementation](https://git.musl-libc.org/cgit/musl/tree/src/network/lookup_name.c).
+
 ## GitHub releases
 
 The `Release binaries` workflow builds and tests both targets on native GitHub
