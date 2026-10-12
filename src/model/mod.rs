@@ -14,7 +14,7 @@ pub mod validation;
 pub use credential::{CredentialBackend, CredentialPreference, CredentialRef, ResolvedCredentials};
 pub use endpoint::{Endpoint, EndpointParseError, Host};
 pub use failure::ConnectionFailure;
-pub use history::HistoryEntry;
+pub use history::{HistoryEntry, MessageEntry};
 pub use id::{CredentialKey, IdParseError, ProfileId, SessionId};
 pub use plan::{ConnectionPlan, FreeRdpClient};
 pub use prepared::{PreparedConnection, RouteHandle, TunnelHandle};

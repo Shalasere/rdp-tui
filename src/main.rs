@@ -32,6 +32,7 @@ fn main() -> ExitCode {
         return match rdp_tui::session::launcher::run_from_environment() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
+                rdp_tui::diagnostics::log(format_args!("supervisor failed: {error}"));
                 eprintln!("rdp-tui supervise: {error}");
                 ExitCode::FAILURE
             }

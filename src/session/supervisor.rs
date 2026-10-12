@@ -69,6 +69,7 @@ pub fn supervise(
 ) -> Result<SessionResult, SuperviseError> {
     let supervisor =
         observe(std::process::id(), ChildKind::Supervisor, session).map_err(SuperviseError::Io)?;
+    let started = Instant::now();
     let outcome = run_supervised(
         plan,
         profile_id,
@@ -82,8 +83,30 @@ pub fn supervise(
         supervisor,
     );
     let _ = record::remove(records_dir, session);
-    if let Ok(result) = &outcome {
-        record_history(state_dir, profile_id, result);
+    match &outcome {
+        Ok(result) => record_history(state_dir, profile_id, session, result),
+        Err(error) => {
+            let failure = match error {
+                SuperviseError::Credential(_) => ConnectionFailure::Configuration,
+                SuperviseError::Preflight(PreflightError::Preparation(failure)) => *failure,
+                SuperviseError::Preflight(PreflightError::Reachability(error)) => error.failure(),
+                SuperviseError::Io(_) => ConnectionFailure::ProcessFailure,
+            };
+            record_history(
+                state_dir,
+                profile_id,
+                session,
+                &SessionResult {
+                    duration: started.elapsed(),
+                    exit_code: None,
+                    failure: Some(failure),
+                    established: false,
+                    ended_by_user: false,
+                    renderer: plan.client.renderer,
+                    freerdp_version: plan.client.version.clone(),
+                },
+            );
+        }
     }
     outcome
 }
@@ -144,8 +167,7 @@ fn run_supervised(
         // fullscreen profile. Retry once with the stable X11 client, reusing the
         // already-acquired route and askpass. Gated on the X11 client actually being
         // installed (freerdp.capabilities.x11).
-        let exited_nonzero =
-            matches!(&monitor_outcome, MonitorOutcome::Exited(status) if !status.success());
+        let exited_nonzero = matches!(&monitor_outcome, MonitorOutcome::Exited { status, failure: None, established: false, ended_by_user: false } if !status.success());
         if should_fallback_to_x11(
             prepared.plan.client.renderer,
             prepared.plan.display.fullscreen,
@@ -199,12 +221,22 @@ fn result_from_monitor(
     state_dir: &Path,
     duration: Duration,
 ) -> Result<SessionResult, SuperviseError> {
-    let (exit_code, failure) = match outcome {
-        MonitorOutcome::Exited(status) => {
+    let (exit_code, failure, established, ended_by_user) = match outcome {
+        MonitorOutcome::Exited {
+            status,
+            failure,
+            established,
+            ended_by_user,
+        } => {
             let _ = crate::freerdp::certificate::remove_mismatch(state_dir, profile_id);
             (
                 status.code(),
-                (!status.success()).then_some(ConnectionFailure::ProcessFailure),
+                failure.or_else(|| {
+                    (!status.success() && !ended_by_user)
+                        .then_some(ConnectionFailure::ProcessFailure)
+                }),
+                established,
+                ended_by_user,
             )
         }
         MonitorOutcome::CertificateChanged(presented_sha256) => {
@@ -223,13 +255,15 @@ fn result_from_monitor(
             };
             crate::freerdp::certificate::write_mismatch(state_dir, &mismatch)
                 .map_err(SuperviseError::Io)?;
-            (None, Some(ConnectionFailure::Certificate))
+            (None, Some(ConnectionFailure::Certificate), false, false)
         }
     };
     Ok(SessionResult {
         duration,
         exit_code,
         failure,
+        established,
+        ended_by_user,
         renderer: prepared.plan.client.renderer,
         freerdp_version: prepared.plan.client.version.clone(),
     })
@@ -256,7 +290,12 @@ fn discover_x11_client() -> Option<FreeRdpClient> {
 }
 
 enum MonitorOutcome {
-    Exited(std::process::ExitStatus),
+    Exited {
+        status: std::process::ExitStatus,
+        failure: Option<ConnectionFailure>,
+        established: bool,
+        ended_by_user: bool,
+    },
     CertificateChanged(String),
 }
 
@@ -287,6 +326,9 @@ fn monitor(child: &mut OwnedChild, log: &Path) -> std::io::Result<MonitorOutcome
     const TAIL_LIMIT: usize = 64 * 1024;
     let mut reader = std::fs::File::open(log)?;
     let mut tail = Vec::new();
+    let mut failure = None;
+    let mut established = false;
+    let mut ended_by_user = false;
     loop {
         reader.read_to_end(&mut tail)?;
         if let Some(fingerprint) =
@@ -295,6 +337,12 @@ fn monitor(child: &mut OwnedChild, log: &Path) -> std::io::Result<MonitorOutcome
             child.terminate_if_owned()?;
             return Ok(MonitorOutcome::CertificateChanged(fingerprint));
         }
+        if authentication_failed(&String::from_utf8_lossy(&tail)) {
+            failure = Some(ConnectionFailure::Authentication);
+        }
+        // GDI initialization happens after capability negotiation in PostConnect.
+        established |= String::from_utf8_lossy(&tail).contains("Local framebuffer format");
+        ended_by_user |= String::from_utf8_lossy(&tail).contains("Connection aborted by user");
         if tail.len() > TAIL_LIMIT {
             tail.drain(..tail.len() - TAIL_LIMIT);
         }
@@ -305,10 +353,31 @@ fn monitor(child: &mut OwnedChild, log: &Path) -> std::io::Result<MonitorOutcome
             {
                 return Ok(MonitorOutcome::CertificateChanged(fingerprint));
             }
-            return Ok(MonitorOutcome::Exited(status));
+            if authentication_failed(&String::from_utf8_lossy(&tail)) {
+                failure = Some(ConnectionFailure::Authentication);
+            }
+            established |= String::from_utf8_lossy(&tail).contains("Local framebuffer format");
+            ended_by_user |= String::from_utf8_lossy(&tail).contains("Connection aborted by user");
+            return Ok(MonitorOutcome::Exited {
+                status,
+                failure: if status.success() { None } else { failure },
+                established,
+                ended_by_user: ended_by_user && failure.is_none(),
+            });
         }
         std::thread::sleep(POLL);
     }
+}
+
+/// Classify explicit authentication failures, rather than guessing from an exit code.
+fn authentication_failed(output: &str) -> bool {
+    [
+        "ERRCONNECT_LOGON_FAILURE",
+        "ERRCONNECT_AUTHENTICATION_FAILED",
+        "ERRCONNECT_WRONG_PASSWORD",
+    ]
+    .iter()
+    .any(|marker| output.contains(marker))
 }
 
 fn tunnel_identity(prepared: &PreparedConnection, session: SessionId) -> Option<ProcessIdentity> {
@@ -322,12 +391,18 @@ fn tunnel_identity(prepared: &PreparedConnection, session: SessionId) -> Option<
 
 /// Append this session's outcome to the connection history. Best-effort: a
 /// history write must never fail a session that already completed.
-fn record_history(state_dir: &Path, profile_id: ProfileId, result: &SessionResult) {
+fn record_history(
+    state_dir: &Path,
+    profile_id: ProfileId,
+    session: SessionId,
+    result: &SessionResult,
+) {
     const HISTORY_CAP: usize = 200;
     let finished_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    let entry = HistoryEntry::from_result(profile_id, result, finished_at);
+    let mut entry = HistoryEntry::from_result(profile_id, result, finished_at);
+    entry.session_id = Some(session);
     let _ = ConfigStore::new(state_dir).record_history(entry, HISTORY_CAP);
 }
 

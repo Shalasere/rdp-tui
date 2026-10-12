@@ -128,6 +128,8 @@ fn run_with_askpass(
             duration: started.elapsed(),
             exit_code: status.code(),
             failure: (!status.success()).then_some(ConnectionFailure::ProcessFailure),
+            established: false,
+            ended_by_user: false,
             renderer: prepared.plan.client.renderer,
             freerdp_version: prepared.plan.client.version.clone(),
         })

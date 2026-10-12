@@ -99,6 +99,18 @@ The file is owner-readable only. It records preflight endpoints, failure
 categories, and kernel socket errors; credentials, FreeRDP command lines, and
 secret environment values must never be written to it.
 
+Failed actions in the Rust TUI open a scrollable error dialog. Failures after a
+session connects show a notification without interrupting editing or password
+entry. Explicit user disconnects produce a short status message. Press `m` to
+reopen error details, `h` for connection history, or `s` for profile status.
+These views support arrow keys, Page Up/Down, and Home/End; Enter or Esc closes
+them. Error dialogs wait until you return to the profile list if you are editing.
+
+The latest 200 error messages are retained across restarts in the owner-only
+`~/.local/state/rdp-tui/messages.toml`, separately from the opt-in diagnostics
+log. Detached supervisors do not read or write the launcher's terminal; their
+outcomes appear through the TUI and history, preserving the screen's framing.
+
 ## Advanced RDP settings
 
 The basic form keeps common connection settings concise. Select **Advanced RDP

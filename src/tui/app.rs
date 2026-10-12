@@ -11,8 +11,8 @@ use crate::config::ConfigStore;
 use crate::credentials::SystemCredentialStore;
 use crate::model::fields;
 use crate::model::{
-    DeviceConfig, DisplayConfig, Endpoint, IdentityConfig, Profile, ProfileId, Route,
-    SecurityConfig,
+    DeviceConfig, DisplayConfig, Endpoint, HistoryEntry, IdentityConfig, MessageEntry, Profile,
+    ProfileId, Route, SecurityConfig, SessionId,
 };
 use crate::operations::{self, CredentialSlot};
 use crate::profile_store::ProfileStore;
@@ -24,12 +24,13 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 use secrecy::zeroize::Zeroizing;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -43,6 +44,8 @@ pub fn run(config_root: &Path) -> io::Result<()> {
     let profiles = store.list().map_err(io::Error::other)?;
     let executable = std::env::current_exe()?;
     let mut app = App::new(profiles, executable, config_root.to_path_buf());
+    app.load_message_history(&state_dir());
+    app.watch_existing_sessions();
 
     let mut guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -78,9 +81,64 @@ enum Mode {
         action: PromptAction,
     },
     Editing(Box<EditForm>),
-    /// A read-only details/session overlay; any key returns to browsing.
-    Status(String),
+    /// Read-only, scrollable details; explicit dismissal returns to browsing.
+    Status(TextView),
     CertificateMismatch(crate::freerdp::certificate::CertificateMismatch),
+}
+
+/// A modal message; scrolling bounds are refreshed when the terminal is resized.
+struct TextView {
+    title: &'static str,
+    message: String,
+    scroll: u16,
+    max_scroll: u16,
+    page_height: u16,
+}
+
+impl TextView {
+    fn new(title: &'static str, mut message: String) -> Self {
+        message.truncate(message.trim_end().len());
+        Self {
+            title,
+            message,
+            scroll: 0,
+            max_scroll: 0,
+            page_height: 1,
+        }
+    }
+
+    /// Returns true only for an explicit dismissal key.
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll = self.scroll.saturating_add(1).min(self.max_scroll);
+            }
+            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(self.page_height),
+            KeyCode::PageDown => {
+                self.scroll = self
+                    .scroll
+                    .saturating_add(self.page_height)
+                    .min(self.max_scroll);
+            }
+            KeyCode::Home => self.scroll = 0,
+            KeyCode::End => self.scroll = self.max_scroll,
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => return true,
+            _ => {}
+        }
+        false
+    }
+}
+
+struct WatchedSession {
+    id: SessionId,
+    name: String,
+    initiated_here: bool,
+}
+
+enum BackgroundResult {
+    Status(String),
+    Error(String),
 }
 
 /// Every editable profile field, in the order shown in the form. Matches the set
@@ -384,6 +442,18 @@ fn deep_test_message(outcome: crate::session::DeepTest) -> &'static str {
     }
 }
 
+fn session_message(entry: &HistoryEntry, name: &str) -> String {
+    let mut message = entry.summarize(name, now_secs());
+    if entry.failure == Some(crate::model::ConnectionFailure::Authentication) {
+        message.push_str("\n\nSelect this profile and press p to update its saved password. Use e to check the username and domain.");
+    } else if entry.failure == Some(crate::model::ConnectionFailure::Certificate) {
+        message.push_str("\n\nSelect this profile and press T to review the changed certificate before reconnecting.");
+    } else if entry.failure.is_some() {
+        message.push_str("\n\nUse t to check reachability or D to test authentication. Use L to enable diagnostics before reproducing the failure.");
+    }
+    message
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -404,9 +474,16 @@ struct App {
     executable: PathBuf,
     config_root: PathBuf,
     mode: Mode,
-    background_tx: Sender<String>,
-    background_rx: Receiver<String>,
+    background_tx: Sender<BackgroundResult>,
+    background_rx: Receiver<BackgroundResult>,
     background_busy: bool,
+    launched_sessions: Vec<WatchedSession>,
+    last_session_poll: Instant,
+    error_dialog: Option<TextView>,
+    pending_errors: VecDeque<String>,
+    messages: Vec<MessageEntry>,
+    message_store: Option<ConfigStore>,
+    notification_pending: bool,
 }
 
 impl App {
@@ -424,6 +501,13 @@ impl App {
             background_tx,
             background_rx,
             background_busy: false,
+            launched_sessions: Vec::new(),
+            last_session_poll: Instant::now(),
+            error_dialog: None,
+            pending_errors: VecDeque::new(),
+            messages: Vec::new(),
+            message_store: None,
+            notification_pending: false,
         };
         app.recompute_visible();
         app.status = app.describe_current();
@@ -461,7 +545,7 @@ impl App {
     fn reload(&mut self) {
         match self.store().list() {
             Ok(profiles) => self.profiles = profiles,
-            Err(error) => self.status = format!("Could not reload profiles: {error}"),
+            Err(error) => self.queue_error(format!("Could not reload profiles: {error}")),
         }
         self.recompute_visible();
     }
@@ -482,6 +566,11 @@ impl App {
     ) -> io::Result<()> {
         loop {
             self.receive_background_result();
+            if self.last_session_poll.elapsed() >= Duration::from_millis(250) {
+                self.receive_session_results(&state_dir());
+                self.last_session_poll = Instant::now();
+            }
+            self.present_pending_error();
             terminal.draw(|frame| self.draw(frame))?;
             if !event::poll(Duration::from_millis(50))? {
                 continue;
@@ -490,6 +579,10 @@ impl App {
                 continue;
             };
             if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if self.error_dialog.is_some() {
+                self.handle_error_dialog(key);
                 continue;
             }
             match &self.mode {
@@ -501,20 +594,205 @@ impl App {
                 Mode::Password { .. } => self.handle_password(key),
                 Mode::Prompt { .. } => self.handle_prompt(key),
                 Mode::Editing(_) => self.handle_editing(key),
-                Mode::Status(_) => {
-                    self.mode = Mode::Browsing;
-                    self.status = self.describe_current();
-                }
+                Mode::Status(_) => self.handle_status(key),
                 Mode::CertificateMismatch(_) => self.handle_certificate_mismatch(key),
             }
         }
     }
 
     fn receive_background_result(&mut self) {
-        while let Ok(status) = self.background_rx.try_recv() {
+        while let Ok(result) = self.background_rx.try_recv() {
             self.background_busy = false;
-            self.status = status;
+            match result {
+                BackgroundResult::Status(status) => self.status = status,
+                BackgroundResult::Error(message) => self.queue_error(message),
+            }
         }
+    }
+
+    fn receive_session_results(&mut self, state_root: &Path) {
+        if self.launched_sessions.is_empty() {
+            return;
+        }
+        let Ok(history) = ConfigStore::new(state_root).load_history() else {
+            return;
+        };
+        let mut notifications = Vec::new();
+        self.launched_sessions.retain(|watched| {
+            let Some(entry) = history
+                .entries
+                .iter()
+                .find(|entry| entry.session_id == Some(watched.id))
+            else {
+                return true;
+            };
+            let message = session_message(entry, &watched.name);
+            notifications.push((
+                message,
+                !entry.succeeded(),
+                watched.initiated_here && !entry.established,
+                watched.id,
+                watched.name.clone(),
+            ));
+            false
+        });
+        for (message, failed, action_failed, session, name) in notifications {
+            if failed {
+                self.retain_message(message.clone(), Some(session));
+                if action_failed {
+                    self.present_error(message);
+                } else {
+                    self.notification_pending = true;
+                    self.status = format!("{name}: session ended with an error.");
+                }
+            } else {
+                self.status = format!("{name}: session closed.");
+            }
+        }
+    }
+
+    fn load_message_history(&mut self, state_root: &Path) {
+        let store = ConfigStore::new(state_root);
+        match store.load_messages() {
+            Ok(messages) => self.messages = messages,
+            Err(error) => self.status = format!("Could not read message history: {error}"),
+        }
+        self.message_store = Some(store);
+    }
+
+    fn watch_existing_sessions(&mut self) {
+        for session in crate::session::scan_sessions(&crate::paths::runtime_sessions_dir()) {
+            if session.health != crate::session::SessionHealth::Running {
+                continue;
+            }
+            let name = self
+                .profiles
+                .iter()
+                .find(|profile| profile.id == session.record.profile_id)
+                .map_or_else(
+                    || session.record.profile_id.to_string(),
+                    |profile| profile.name.clone(),
+                );
+            self.launched_sessions.push(WatchedSession {
+                id: session.record.session_id,
+                name,
+                initiated_here: false,
+            });
+        }
+    }
+
+    fn retain_message(&mut self, message: String, session_id: Option<SessionId>) {
+        self.notification_pending = true;
+        let mut entry = MessageEntry {
+            created_at: now_secs(),
+            message,
+            session_id,
+        };
+        if let Some(store) = &self.message_store
+            && let Err(error) = store.record_message(entry.clone())
+        {
+            let _ = write!(
+                entry.message,
+                "\n\nMessage history could not be saved: {error}. These details are available until the app closes."
+            );
+        }
+        self.messages.push(entry);
+        let excess = self.messages.len().saturating_sub(200);
+        self.messages.drain(..excess);
+    }
+
+    fn queue_error(&mut self, message: String) {
+        self.retain_message(message.clone(), None);
+        self.present_error(message);
+    }
+
+    fn error_status(&mut self, message: String) -> String {
+        self.queue_error(message);
+        self.status.clone()
+    }
+
+    fn present_error(&mut self, message: String) {
+        self.pending_errors.push_back(message);
+        self.status = "Action failed — details pending.".to_string();
+        self.present_pending_error();
+    }
+
+    fn present_pending_error(&mut self) {
+        // Keep password entry, editing, and certificate confirmation intact.
+        if self.error_dialog.is_none()
+            && matches!(self.mode, Mode::Browsing)
+            && let Some(message) = self.pending_errors.pop_front()
+        {
+            self.error_dialog = Some(TextView::new("Error", message));
+            self.status = "Action failed — see dialog.".to_string();
+        }
+    }
+
+    fn handle_error_dialog(&mut self, key: KeyEvent) {
+        if self
+            .error_dialog
+            .as_mut()
+            .is_some_and(|dialog| dialog.handle_key(key))
+        {
+            self.error_dialog = None;
+            self.status = self.describe_current();
+            self.present_pending_error();
+        }
+    }
+
+    fn handle_status(&mut self, key: KeyEvent) {
+        if let Mode::Status(details) = &mut self.mode
+            && details.handle_key(key)
+        {
+            self.mode = Mode::Browsing;
+            self.status = self.describe_current();
+        }
+    }
+
+    fn begin_messages(&mut self) {
+        self.notification_pending = false;
+        let mut messages = self.messages.clone();
+        // Session history also includes failures that finished while the TUI was closed.
+        if let Some(store) = &self.message_store
+            && let Ok(history) = store.load_history()
+        {
+            for entry in history.entries.iter().filter(|entry| !entry.succeeded()) {
+                if entry.session_id.is_some()
+                    && messages
+                        .iter()
+                        .any(|message| message.session_id == entry.session_id)
+                {
+                    continue;
+                }
+                let name = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == entry.profile_id)
+                    .map_or_else(
+                        || entry.profile_id.to_string(),
+                        |profile| profile.name.clone(),
+                    );
+                messages.push(MessageEntry {
+                    created_at: entry.finished_at,
+                    message: session_message(entry, &name),
+                    session_id: entry.session_id,
+                });
+            }
+        }
+        messages.sort_by_key(|message| std::cmp::Reverse(message.created_at));
+        let mut text = String::from("Messages, newest first\n\n");
+        for entry in messages {
+            let _ = writeln!(
+                text,
+                "{}s ago\n{}\n",
+                now_secs().saturating_sub(entry.created_at),
+                entry.message
+            );
+        }
+        if text == "Messages, newest first\n\n" {
+            text.push_str("No messages yet.");
+        }
+        self.mode = Mode::Status(TextView::new("Messages", text));
     }
 
     /// Returns true when the app should exit.
@@ -542,6 +820,7 @@ impl App {
             KeyCode::Char('s') => self.begin_status(),
             KeyCode::Char('L') => self.toggle_diagnostics(),
             KeyCode::Char('h') => self.begin_history(),
+            KeyCode::Char('m') => self.begin_messages(),
             KeyCode::Char('?') => self.begin_help(),
             _ => {}
         }
@@ -809,7 +1088,7 @@ impl App {
                 self.select_id(id);
                 self.status = format!("Cloned to {name}");
             }
-            Err(error) => self.status = format!("Could not clone: {error}"),
+            Err(error) => self.queue_error(format!("Could not clone: {error}")),
         }
     }
 
@@ -846,7 +1125,7 @@ impl App {
                 self.reload();
                 self.status = format!("Deleted {name}");
             }
-            Err(error) => self.status = format!("Could not delete: {error}"),
+            Err(error) => self.queue_error(format!("Could not delete: {error}")),
         }
     }
 
@@ -878,8 +1157,11 @@ impl App {
                     "Imported {}, updated {}, skipped {}, failed {}",
                     counts.added, counts.updated, counts.skipped, counts.failed
                 );
+                if counts.failed > 0 {
+                    self.queue_error(self.status.clone());
+                }
             }
-            Err(error) => self.status = format!("Import failed: {error}"),
+            Err(error) => self.queue_error(format!("Import failed: {error}")),
         }
     }
 
@@ -912,7 +1194,7 @@ impl App {
         }
         self.status = match std::fs::write(&destination, contents) {
             Ok(()) => format!("Exported {name} to {} (no password)", destination.display()),
-            Err(error) => format!("Export failed: {error}"),
+            Err(error) => self.error_status(format!("Export failed: {error}")),
         };
     }
 
@@ -980,7 +1262,7 @@ impl App {
                 .as_deref()
                 .map_or_else(|| "disabled".into(), |path| path.display().to_string())
         );
-        self.mode = Mode::Status(text);
+        self.mode = Mode::Status(TextView::new("Status", text));
     }
 
     fn toggle_diagnostics(&mut self) {
@@ -992,7 +1274,7 @@ impl App {
         let path = state_dir().join("diagnostics.log");
         self.status = match crate::diagnostics::enable(path.clone()) {
             Ok(()) => format!("Diagnostics enabled: {}", path.display()),
-            Err(error) => format!("Could not enable diagnostics: {error}"),
+            Err(error) => self.error_status(format!("Could not enable diagnostics: {error}")),
         };
     }
 
@@ -1001,7 +1283,7 @@ impl App {
         let history = ConfigStore::new(state_dir())
             .load_history()
             .unwrap_or_default();
-        let mut text = String::from("Recent connections (any key returns):\n");
+        let mut text = String::from("Recent connections:\n");
         let mut shown = 0_usize;
         for entry in history.entries.iter().rev() {
             let name = self
@@ -1014,18 +1296,15 @@ impl App {
                 );
             let _ = writeln!(text, "  {}", entry.summarize(&name, now));
             shown += 1;
-            if shown >= 15 {
-                break;
-            }
         }
         if shown == 0 {
             text.push_str("  none yet\n");
         }
-        self.mode = Mode::Status(text);
+        self.mode = Mode::Status(TextView::new("Connections", text));
     }
 
     fn begin_help(&mut self) {
-        let mut text = String::from("Keys (any key returns):\n\n");
+        let mut text = String::from("Keys:\n\n");
         for (key, description) in [
             ("Up/Down, j/k", "move selection"),
             ("Enter", "connect"),
@@ -1039,6 +1318,7 @@ impl App {
             ("s", "status"),
             ("L", "toggle diagnostic logging"),
             ("h", "connection history"),
+            ("m", "messages and error details"),
             ("D", "deep-test credentials"),
             ("p", "set / clear main password"),
             ("g", "set / clear gateway password"),
@@ -1050,17 +1330,24 @@ impl App {
             let _ = writeln!(text, "  {key:<14} {description}");
         }
         text.push_str("\nEdit form: Up/Down move, Enter/Space edit, A accept, Esc cancel");
-        self.mode = Mode::Status(text);
+        self.mode = Mode::Status(TextView::new("Help", text));
     }
 
     fn connect(&mut self) {
         let Some(profile) = self.current().cloned() else {
             return;
         };
-        self.status = match connect_profile(&profile, &self.executable) {
-            Ok(session) => format!("Launched session {session} for {}", profile.name),
-            Err(error) => format!("Connect failed: {error}"),
-        };
+        match connect_profile(&profile, &self.executable) {
+            Ok(session) => {
+                self.launched_sessions.push(WatchedSession {
+                    id: session,
+                    name: profile.name.clone(),
+                    initiated_here: true,
+                });
+                self.status = format!("Starting session {session} for {}…", profile.name);
+            }
+            Err(error) => self.queue_error(format!("{}: Connect failed: {error}", profile.name)),
+        }
     }
 
     fn test(&mut self) {
@@ -1076,8 +1363,8 @@ impl App {
         let sender = self.background_tx.clone();
         std::thread::spawn(move || {
             let status = match test_profile(&profile, TEST_TIMEOUT) {
-                Ok(()) => format!("{} is reachable", profile.name),
-                Err(error) => format!("{}: {error}", profile.name),
+                Ok(()) => BackgroundResult::Status(format!("{} is reachable", profile.name)),
+                Err(error) => BackgroundResult::Error(format!("{}: {error}", profile.name)),
             };
             let _ = sender.send(status);
         });
@@ -1116,8 +1403,22 @@ impl App {
                 &state_root,
                 acknowledged,
             ) {
-                Ok(outcome) => format!("{}: {}", profile.name, deep_test_message(outcome)),
-                Err(error) => format!("{}: deep-test failed: {error}", profile.name),
+                Ok(outcome) => {
+                    let message = format!("{}: {}", profile.name, deep_test_message(outcome));
+                    if matches!(
+                        outcome,
+                        crate::session::DeepTest::Authenticated
+                            | crate::session::DeepTest::RateLimited
+                            | crate::session::DeepTest::NeedsAcknowledgement
+                    ) {
+                        BackgroundResult::Status(message)
+                    } else {
+                        BackgroundResult::Error(message)
+                    }
+                }
+                Err(error) => {
+                    BackgroundResult::Error(format!("{}: deep-test failed: {error}", profile.name))
+                }
             };
             let _ = sender.send(status);
         });
@@ -1160,13 +1461,13 @@ impl App {
             self.status = match self.clear_password(index, slot) {
                 Ok(true) => format!("Cleared the password for {name}"),
                 Ok(false) => format!("{name} had no saved password"),
-                Err(error) => format!("Could not clear password: {error}"),
+                Err(error) => self.error_status(format!("Could not clear password: {error}")),
             };
             return;
         }
         self.status = match self.save_password(index, slot, &password) {
             Ok(()) => format!("Saved a password for {name}"),
-            Err(error) => format!("Could not save password: {error}"),
+            Err(error) => self.error_status(format!("Could not save password: {error}")),
         };
     }
 
@@ -1206,7 +1507,7 @@ impl App {
         match crate::freerdp::certificate::read_mismatch(&state_dir(), profile.id) {
             Ok(Some(mismatch)) => self.mode = Mode::CertificateMismatch(mismatch),
             Ok(None) => self.status = "No changed certificate is awaiting confirmation.".into(),
-            Err(error) => self.status = format!("Could not read certificate status: {error}"),
+            Err(error) => self.queue_error(format!("Could not read certificate status: {error}")),
         }
     }
 
@@ -1237,7 +1538,9 @@ impl App {
                     &fingerprint,
                 ) {
                     Ok(_) => "Certificate approved; reconnect to pin the replacement.".into(),
-                    Err(error) => format!("Could not approve certificate: {error}"),
+                    Err(error) => {
+                        self.error_status(format!("Could not approve certificate: {error}"))
+                    }
                 };
             }
             KeyCode::Char('q' | 'Q') | KeyCode::Esc => {
@@ -1281,7 +1584,9 @@ fn profile_matches(profile: &Profile, query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, CredentialSlot, EditForm, FIELDS, Field, Mode, PromptAction};
+    use super::{
+        App, BackgroundResult, CredentialSlot, EditForm, FIELDS, Field, Mode, PromptAction,
+    };
     use crate::config::ConfigStore;
     use crate::model::{
         CertificatePolicy, DeviceConfig, DisplayConfig, Endpoint, GraphicsMode, IdentityConfig,
@@ -1337,6 +1642,239 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect()
+    }
+
+    #[test]
+    fn normal_launch_reports_its_authentication_failure_once_and_ignores_old_attempts() {
+        use crate::model::{ConnectionFailure, HistoryEntry, SessionId};
+        let state = TempDir::new().unwrap();
+        let store = ConfigStore::new(state.path());
+        let mut app = app_with(&["Anima"]);
+        let profile = app.current().unwrap().id;
+        let session = SessionId::generate();
+        let mut entry = HistoryEntry {
+            profile_id: profile,
+            session_id: Some(SessionId::generate()),
+            finished_at: 1000,
+            duration_ms: 100,
+            exit_code: Some(134),
+            failure: Some(ConnectionFailure::Authentication),
+            renderer: Renderer::X11,
+            established: false,
+            ended_by_user: false,
+        };
+        store.record_history(entry.clone(), 200).unwrap();
+        app.launched_sessions.push(super::WatchedSession {
+            id: session,
+            name: "Anima".to_string(),
+            initiated_here: true,
+        });
+        app.status = "Starting Anima".to_string();
+        app.receive_session_results(state.path());
+        assert_eq!(app.status, "Starting Anima");
+        assert_eq!(app.launched_sessions.len(), 1);
+
+        entry.session_id = Some(session);
+        store.record_history(entry, 200).unwrap();
+        app.receive_session_results(state.path());
+        let dialog = app
+            .error_dialog
+            .as_ref()
+            .expect("failed launches open an error dialog");
+        assert!(dialog.message.contains("Anima"));
+        assert!(dialog.message.contains("host rejected the credentials"));
+        assert!(dialog.message.contains("press p"));
+        assert!(!app.status.contains("host rejected the credentials"));
+        assert!(app.launched_sessions.is_empty());
+        let screen = rendered(&mut app, 80, 24);
+        assert!(screen.contains("authentication failed"));
+        assert!(screen.contains("press p"));
+
+        app.status = "Password updated".to_string();
+        app.receive_session_results(state.path());
+        assert_eq!(app.status, "Password updated");
+    }
+
+    #[test]
+    fn error_dialog_scrolls_to_the_end_in_small_terminals_and_clamps_after_resize() {
+        let mut app = app_with(&["Anima"]);
+        let message = format!(
+            "START_MARKER\n{}\nTAIL_SENTINEL",
+            "Long diagnostic detail to wrap across several lines.\n".repeat(20)
+        );
+        app.queue_error(message);
+        for (width, height) in [(80, 24), (40, 12), (24, 8), (80, 24)] {
+            rendered(&mut app, width, height);
+            app.handle_error_dialog(press(KeyCode::End));
+            let screen = rendered(&mut app, width, height);
+            assert!(
+                screen.contains("TAIL_SENTINEL"),
+                "missing message end at {width}x{height}"
+            );
+            assert!(
+                app.error_dialog.is_some(),
+                "scrolling must not dismiss the dialog"
+            );
+            app.handle_error_dialog(press(KeyCode::Down));
+            assert!(rendered(&mut app, width, height).contains("TAIL_SENTINEL"));
+            app.handle_error_dialog(press(KeyCode::Home));
+            assert!(rendered(&mut app, width, height).contains("START_MARKER"));
+        }
+        app.handle_error_dialog(press(KeyCode::Enter));
+        assert!(app.error_dialog.is_none());
+        assert!(matches!(app.mode, Mode::Browsing));
+    }
+
+    #[test]
+    fn errors_wait_for_password_entry_and_queue_without_replacing_the_current_dialog() {
+        let mut app = app_with(&["Anima"]);
+        app.begin_password(CredentialSlot::Main);
+        app.handle_password(press(KeyCode::Char('x')));
+        app.queue_error("First failure".to_string());
+        app.queue_error("Second failure".to_string());
+        assert!(app.error_dialog.is_none());
+        assert!(matches!(&app.mode, Mode::Password { input, .. } if input.as_str() == "x"));
+        app.handle_password(press(KeyCode::Esc));
+        app.present_pending_error();
+        assert_eq!(app.error_dialog.as_ref().unwrap().message, "First failure");
+        app.queue_error("Third failure".to_string());
+        assert_eq!(app.error_dialog.as_ref().unwrap().message, "First failure");
+        app.handle_error_dialog(press(KeyCode::Esc));
+        assert_eq!(app.error_dialog.as_ref().unwrap().message, "Second failure");
+        app.handle_error_dialog(press(KeyCode::Enter));
+        assert_eq!(app.error_dialog.as_ref().unwrap().message, "Third failure");
+        app.handle_error_dialog(press(KeyCode::Esc));
+        assert!(app.error_dialog.is_none());
+    }
+
+    #[test]
+    fn failed_connection_checks_open_the_dialog_while_success_stays_in_the_footer() {
+        let mut app = app_with(&["Anima"]);
+        app.background_tx
+            .send(BackgroundResult::Status("Anima is reachable".to_string()))
+            .unwrap();
+        app.receive_background_result();
+        assert_eq!(app.status, "Anima is reachable");
+        assert!(app.error_dialog.is_none());
+        app.background_tx
+            .send(BackgroundResult::Error(
+                "Anima: the host rejected the credentials".to_string(),
+            ))
+            .unwrap();
+        app.receive_background_result();
+        assert!(
+            app.error_dialog
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("host rejected the credentials")
+        );
+    }
+
+    #[test]
+    fn established_session_errors_notify_without_stealing_input_and_survive_restart() {
+        use crate::model::{ConnectionFailure, HistoryEntry, SessionId};
+        let state = TempDir::new().unwrap();
+        let mut app = app_with(&["Anima"]);
+        app.load_message_history(state.path());
+        let session = SessionId::generate();
+        let entry = HistoryEntry {
+            profile_id: app.current().unwrap().id,
+            session_id: Some(session),
+            finished_at: 1000,
+            duration_ms: 100,
+            exit_code: Some(134),
+            failure: Some(ConnectionFailure::ProcessFailure),
+            renderer: Renderer::X11,
+            established: true,
+            ended_by_user: false,
+        };
+        ConfigStore::new(state.path())
+            .record_history(entry, 200)
+            .unwrap();
+        app.launched_sessions.push(super::WatchedSession {
+            id: session,
+            name: "Anima".to_string(),
+            initiated_here: true,
+        });
+        app.begin_password(CredentialSlot::Main);
+        app.handle_password(press(KeyCode::Char('x')));
+        app.receive_session_results(state.path());
+        assert!(app.error_dialog.is_none());
+        assert!(app.pending_errors.is_empty());
+        assert!(app.notification_pending);
+        assert!(matches!(&app.mode, Mode::Password { input, .. } if input.as_str() == "x"));
+        app.handle_password(press(KeyCode::Esc));
+        app.present_pending_error();
+        assert!(
+            app.error_dialog.is_none(),
+            "background errors must not become modal after editing"
+        );
+        let before = app.messages.clone();
+        let mut restarted = app_with(&["Anima"]);
+        restarted.load_message_history(state.path());
+        assert_eq!(restarted.messages, before);
+        restarted.handle_browsing(press(KeyCode::Char('m')));
+        assert!(
+            matches!(&restarted.mode, Mode::Status(details) if details.message.contains("Anima") && details.message.contains("enable diagnostics"))
+        );
+    }
+
+    #[test]
+    fn dismissed_errors_reopen_in_scrollable_message_history_with_the_full_tail() {
+        let state = TempDir::new().unwrap();
+        let mut app = app_with(&["Anima"]);
+        app.load_message_history(state.path());
+        let message = format!(
+            "Failure\n{}\nTAIL_SENTINEL",
+            "Diagnostic details to read later.\n".repeat(40)
+        );
+        app.queue_error(message.clone());
+        app.handle_error_dialog(press(KeyCode::Esc));
+        assert!(app.error_dialog.is_none());
+        assert_eq!(app.messages[0].message, message);
+        app.handle_browsing(press(KeyCode::Char('m')));
+        assert!(!app.notification_pending);
+        for (width, height) in [(80, 24), (24, 8), (40, 12)] {
+            rendered(&mut app, width, height);
+            app.handle_status(press(KeyCode::End));
+            assert!(rendered(&mut app, width, height).contains("TAIL_SENTINEL"));
+            assert!(matches!(app.mode, Mode::Status(_)));
+        }
+        app.handle_status(press(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Browsing));
+    }
+
+    #[test]
+    fn expected_user_disconnects_are_short_status_messages() {
+        use crate::model::{HistoryEntry, SessionId};
+        let state = TempDir::new().unwrap();
+        let mut app = app_with(&["Anima"]);
+        let session = SessionId::generate();
+        let entry = HistoryEntry {
+            profile_id: app.current().unwrap().id,
+            session_id: Some(session),
+            finished_at: 1000,
+            duration_ms: 100,
+            exit_code: Some(131),
+            failure: None,
+            renderer: Renderer::X11,
+            established: true,
+            ended_by_user: true,
+        };
+        ConfigStore::new(state.path())
+            .record_history(entry, 200)
+            .unwrap();
+        app.launched_sessions.push(super::WatchedSession {
+            id: session,
+            name: "Anima".to_string(),
+            initiated_here: true,
+        });
+        app.receive_session_results(state.path());
+        assert!(app.error_dialog.is_none());
+        assert!(!app.notification_pending);
+        assert!(app.messages.is_empty());
+        assert_eq!(app.status, "Anima: session closed.");
     }
 
     #[test]

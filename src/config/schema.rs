@@ -1,5 +1,5 @@
 use super::StoreError;
-use crate::model::{CertificatePolicy, HistoryEntry, Profile, ProfileId, Renderer};
+use crate::model::{CertificatePolicy, HistoryEntry, MessageEntry, Profile, ProfileId, Renderer};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -60,6 +60,30 @@ impl Default for HistoryDocument {
             entries: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessagesDocument {
+    pub version: u32,
+    #[serde(default)]
+    pub entries: Vec<MessageEntry>,
+}
+
+impl Default for MessagesDocument {
+    fn default() -> Self {
+        Self {
+            version: CONFIG_SCHEMA_VERSION,
+            entries: Vec::new(),
+        }
+    }
+}
+
+pub(super) fn parse_messages_document(text: &str) -> Result<MessagesDocument, StoreError> {
+    let document = toml::from_str::<MessagesDocument>(text)
+        .map_err(|error| toml_error("messages.toml", &error))?;
+    validate_version("messages.toml", document.version)?;
+    Ok(document)
 }
 
 /// Parse and validate `history.toml` without filesystem access.

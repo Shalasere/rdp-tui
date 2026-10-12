@@ -25,6 +25,10 @@ pub struct SessionResult {
     pub duration: Duration,
     pub exit_code: Option<i32>,
     pub failure: Option<ConnectionFailure>,
+    #[serde(default)]
+    pub established: bool,
+    #[serde(default)]
+    pub ended_by_user: bool,
     pub renderer: Renderer,
     pub freerdp_version: Version,
 }

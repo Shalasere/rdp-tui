@@ -1,10 +1,11 @@
 //! Locked, durable persistence for schema-versioned configuration documents.
 
+use super::schema::{MessagesDocument, parse_messages_document};
 use super::{
     ConfigDocument, HistoryDocument, ProfilesDocument, StoreError, parse_config_document,
     parse_history_document, parse_profiles_document,
 };
-use crate::model::HistoryEntry;
+use crate::model::{HistoryEntry, MessageEntry};
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -98,6 +99,42 @@ impl ConfigStore {
             load_document(&path, ProfilesDocument::default(), parse_profiles_document)?;
         update(&mut document)?;
         write_document(&path, &document, parse_profiles_document)
+    }
+
+    /// Load retained diagnostic messages; a missing file is an empty history.
+    ///
+    /// # Errors
+    /// Returns an error when the document cannot be read or validated.
+    pub fn load_messages(&self) -> Result<Vec<MessageEntry>, StoreError> {
+        let document = load_document(
+            &self.root.join("messages.toml"),
+            MessagesDocument::default(),
+            parse_messages_document,
+        )?;
+        Ok(document.entries)
+    }
+
+    /// Save a diagnostic message under a lock, retaining the most recent 200.
+    ///
+    /// # Errors
+    /// Returns an error for invalid data, lock contention, or filesystem failure.
+    pub fn record_message(&self, entry: MessageEntry) -> Result<(), StoreError> {
+        let path = self.root.join("messages.toml");
+        let _lock = acquire_lock(&path)?;
+        let mut document =
+            load_document(&path, MessagesDocument::default(), parse_messages_document)?;
+        if entry.session_id.is_some()
+            && document
+                .entries
+                .iter()
+                .any(|old| old.session_id == entry.session_id)
+        {
+            return Ok(());
+        }
+        document.entries.push(entry);
+        let excess = document.entries.len().saturating_sub(200);
+        document.entries.drain(..excess);
+        write_document(&path, &document, parse_messages_document)
     }
 
     /// Location of the connection-history document.
@@ -234,12 +271,58 @@ mod tests {
     fn entry(finished_at: u64) -> HistoryEntry {
         HistoryEntry {
             profile_id: ProfileId::generate(),
+            session_id: None,
             finished_at,
             duration_ms: 1000,
             exit_code: Some(0),
             failure: None,
             renderer: Renderer::X11,
+            established: false,
+            ended_by_user: false,
         }
+    }
+
+    #[test]
+    fn diagnostic_messages_preserve_full_text_and_are_private_and_deduplicated() {
+        use crate::model::{MessageEntry, SessionId};
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path());
+        assert!(store.load_messages().unwrap().is_empty());
+        let entry = MessageEntry {
+            created_at: 1000,
+            session_id: Some(SessionId::generate()),
+            message: "Long Unicode detail: 雪\n".repeat(200),
+        };
+        store.record_message(entry.clone()).unwrap();
+        store.record_message(entry.clone()).unwrap();
+        assert_eq!(
+            ConfigStore::new(dir.path()).load_messages().unwrap(),
+            vec![entry]
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("messages.toml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let corrupt = "version = invalid";
+        std::fs::write(dir.path().join("messages.toml"), corrupt).unwrap();
+        assert!(
+            store
+                .record_message(MessageEntry {
+                    created_at: 2000,
+                    session_id: None,
+                    message: "New failure".to_string()
+                })
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("messages.toml")).unwrap(),
+            corrupt
+        );
     }
 
     #[test]

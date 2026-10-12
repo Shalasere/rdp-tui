@@ -17,7 +17,7 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, RawFd};
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const PLAN_FD: &str = "RDP_TUI_PLAN_FD";
@@ -44,6 +44,12 @@ pub fn spawn_supervisor(
     let (read_end, write_end) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
     let mut command = Command::new(executable);
     command.arg(SUPERVISE_ARG);
+    // Detached owners must not read from or write onto the launcher's terminal.
+    // Outcomes go through history; opt-in diagnostics use their own log file.
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     command.env(PLAN_FD, read_end.as_raw_fd().to_string());
     command.env(SESSION_ID, session.to_string());
     command.env(PROFILE_ID, profile_id.to_string());
