@@ -1,7 +1,7 @@
 //! Process spawning with immediate compound identity capture and an explicit
 //! detachment policy.
 
-use super::registry::{ChildKind, ProcessIdentity, observe};
+use super::registry::{ChildKind, ProcessIdentity, observe_unreaped_child};
 use crate::model::SessionId;
 use rustix::process::{Signal, set_parent_process_death_signal};
 use std::os::unix::process::CommandExt;
@@ -35,7 +35,7 @@ pub struct OwnedChild {
 ///
 /// # Errors
 ///
-/// Returns an I/O error if spawning fails or the child exits before identity capture.
+/// Returns an I/O error if spawning fails or the child's identity cannot be read.
 pub fn spawn_child(
     command: &mut Command,
     kind: ChildKind,
@@ -44,7 +44,7 @@ pub fn spawn_child(
 ) -> std::io::Result<OwnedChild> {
     apply_launch_mode(command, mode);
     let mut child = command.spawn()?;
-    match observe(child.id(), kind, session) {
+    match observe_unreaped_child(child.id(), kind, session) {
         Ok(identity) => Ok(OwnedChild { child, identity }),
         Err(error) => {
             let _ = child.wait();

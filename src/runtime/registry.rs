@@ -55,12 +55,31 @@ pub fn observe(
     kind: ChildKind,
     parent_session_id: SessionId,
 ) -> std::io::Result<ProcessIdentity> {
+    read_identity(pid, kind, parent_session_id, false)
+}
+
+// An owned Child has not been reaped, so its PID cannot be reused even if it
+// exited before identity capture. Keep live-process checks strict elsewhere.
+pub(super) fn observe_unreaped_child(
+    pid: u32,
+    kind: ChildKind,
+    parent_session_id: SessionId,
+) -> std::io::Result<ProcessIdentity> {
+    read_identity(pid, kind, parent_session_id, true)
+}
+
+fn read_identity(
+    pid: u32,
+    kind: ChildKind,
+    parent_session_id: SessionId,
+    allow_zombie: bool,
+) -> std::io::Result<ProcessIdentity> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let tail = stat
         .rsplit_once(") ")
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid proc stat"))?
         .1;
-    if tail.split_whitespace().next() == Some("Z") {
+    if !allow_zombie && tail.split_whitespace().next() == Some("Z") {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "process has exited and is awaiting reaping",
@@ -141,4 +160,32 @@ pub fn scan_for_orphans() -> Vec<DiscoveredProcess> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn an_unreaped_exit_retains_identity_without_being_live() {
+        let session = "550e8400-e29b-41d4-a716-446655440000".parse().unwrap();
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+            if stat.rsplit_once(") ").unwrap().1.starts_with("Z ") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "child did not exit in time");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let identity = observe_unreaped_child(pid, ChildKind::FreeRdp, session).unwrap();
+        assert_eq!(identity.pid, pid);
+        assert!(!still_matches(identity));
+        assert!(child.wait().unwrap().success());
+        assert!(observe_unreaped_child(pid, ChildKind::FreeRdp, session).is_err());
+    }
 }
