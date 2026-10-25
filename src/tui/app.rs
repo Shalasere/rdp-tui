@@ -164,6 +164,7 @@ enum Field {
     SmartSizing,
     Certificate,
     AdminSession,
+    AutoReconnect,
     Network,
     Clipboard,
     Audio,
@@ -171,7 +172,7 @@ enum Field {
     Printers,
 }
 
-const FIELDS: [Field; 24] = [
+const FIELDS: [Field; 25] = [
     Field::Name,
     Field::Host,
     Field::Username,
@@ -191,6 +192,7 @@ const FIELDS: [Field; 24] = [
     Field::SmartSizing,
     Field::Certificate,
     Field::AdminSession,
+    Field::AutoReconnect,
     Field::Network,
     Field::Clipboard,
     Field::Audio,
@@ -220,6 +222,7 @@ impl Field {
             Self::SmartSizing => "Smart sizing",
             Self::Certificate => "Certificate",
             Self::AdminSession => "Admin session",
+            Self::AutoReconnect => "Auto reconnect",
             Self::Network => "Network",
             Self::Clipboard => "Clipboard",
             Self::Audio => "Audio",
@@ -323,6 +326,9 @@ impl EditForm {
             Field::AdminSession => {
                 fields::format_bool(self.draft.security.admin_session).to_owned()
             }
+            Field::AutoReconnect => {
+                fields::format_bool(self.draft.security.auto_reconnect).to_owned()
+            }
             Field::Network => self.draft.security.network_profile.token().to_owned(),
             Field::Clipboard => fields::format_bool(self.draft.devices.clipboard).to_owned(),
             Field::Audio => fields::format_bool(self.draft.devices.audio_playback).to_owned(),
@@ -399,6 +405,7 @@ impl EditForm {
                 *policy = policy.cycled();
             }
             Field::AdminSession => toggle(&mut self.draft.security.admin_session),
+            Field::AutoReconnect => toggle(&mut self.draft.security.auto_reconnect),
             Field::Network => {
                 let network = &mut self.draft.security.network_profile;
                 *network = network.cycled();
@@ -2050,6 +2057,8 @@ mod tests {
         // Toggle multi-monitor on.
         go_to_field(&mut app, Field::Multimon);
         app.handle_editing(press(KeyCode::Char(' ')));
+        go_to_field(&mut app, Field::AutoReconnect);
+        app.handle_editing(press(KeyCode::Char(' ')));
         // Cycle the graphics pipeline (Auto -> Rfx).
         go_to_field(&mut app, Field::Graphics);
         app.handle_editing(press(KeyCode::Char(' ')));
@@ -2064,6 +2073,7 @@ mod tests {
         let saved = store.get(id).unwrap().unwrap();
         assert_eq!(saved.security.certificate_policy, CertificatePolicy::System);
         assert!(saved.display.multimon);
+        assert!(saved.security.auto_reconnect);
         assert_eq!(saved.display.graphics, GraphicsMode::Rfx);
         assert!(matches!(saved.route, Route::SshTunnel { .. }));
     }

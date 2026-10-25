@@ -46,6 +46,8 @@ struct PythonProfile {
     #[serde(default)]
     admin_session: bool,
     #[serde(default)]
+    auto_reconnect: bool,
+    #[serde(default)]
     network_type: String,
     #[serde(default)]
     renderer: String,
@@ -135,6 +137,7 @@ fn convert(index: usize, source: PythonProfile) -> Result<Profile, StoreError> {
             _ => CertificatePolicy::Tofu,
         },
         admin_session: source.admin_session,
+        auto_reconnect: source.auto_reconnect,
         network_profile: match source.network_type.as_str() {
             "modem" => crate::model::NetworkProfile::Modem,
             "broadband-low" => crate::model::NetworkProfile::BroadbandLow,

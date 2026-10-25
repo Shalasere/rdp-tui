@@ -36,6 +36,22 @@ fn config_and_profiles_toml_roundtrip() {
 }
 
 #[test]
+fn profiles_without_reconnect_setting_keep_the_previous_default() {
+    let profiles = ProfilesDocument {
+        version: 1,
+        profiles: vec![profile()],
+    };
+    let text = toml::to_string_pretty(&profiles).unwrap();
+    let legacy = text.replace("auto_reconnect = false\n", "");
+    assert_ne!(legacy, text);
+    assert!(
+        !parse_profiles_document(&legacy).unwrap().profiles[0]
+            .security
+            .auto_reconnect
+    );
+}
+
+#[test]
 fn unsupported_schema_versions_are_rejected() {
     let error = parse_profiles_document("version = 2\nprofiles = []\n").unwrap_err();
     assert!(matches!(

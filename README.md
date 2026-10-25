@@ -163,6 +163,17 @@ captured by the failed attempt. No manual FreeRDP `.pem` editing is required.
 
 `extra_options` is split on whitespace and is intended for simple FreeRDP flags, e.g. `/multimon +auto-reconnect`.
 
+In the Rust profile editor, **Auto reconnect** controls recovery after a temporary
+network interruption. Select it and press Space or Enter to toggle it, then
+press `A` to save. The CLI equivalent is
+`rdp-tui set <id> auto-reconnect true` (or `false` to disable).
+The setting is stored as `security.auto_reconnect` and defaults to off for
+profiles that omit it. When enabled, it allows up to 1,000 reconnect attempts;
+a finite limit avoids an SDL 3.32.2 bug that treats the documented unlimited
+value, `0`, as no attempts. Remove reconnect flags from advanced overrides when
+using this setting, since those overrides are applied afterward. Recovery still
+depends on the remote host keeping the session available.
+
 ## RDP gateways
 
 Set **Gateway host**, **Gateway user**, and **Gateway domain** in **Advanced RDP

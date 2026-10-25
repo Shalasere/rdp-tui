@@ -165,6 +165,7 @@ pub fn import_remmina(text: &str, fallback_name: &str) -> Result<Profile, String
         smart_sizing: scale == "1",
         color_depth: remmina_color_depth(get(&ini, "colordepth")),
         admin_session: flag(&ini, "console"),
+        auto_reconnect: !flag(&ini, "disableautoreconnect"),
         certificate_policy: if flag(&ini, "cert_ignore") {
             CertificatePolicy::Ignore
         } else {
@@ -224,6 +225,7 @@ pub fn import_rdp(text: &str, fallback_name: &str) -> Result<Profile, String> {
         smart_sizing: false,
         color_depth: None,
         admin_session: false,
+        auto_reconnect: get(&values, "autoreconnection enabled") != "0",
         certificate_policy: CertificatePolicy::Tofu,
         network_profile: NetworkProfile::Auto,
         gateway: None,
@@ -259,6 +261,10 @@ pub fn export_rdp(profile: &Profile) -> String {
             if profile.devices.audio_playback { 0 } else { 2 }
         ),
         format!("use multimon:i:{}", i32::from(profile.display.multimon)),
+        format!(
+            "autoreconnection enabled:i:{}",
+            i32::from(profile.security.auto_reconnect)
+        ),
     ];
     if let Some((width, height)) = profile.display.resolution {
         lines.push(format!("desktopwidth:i:{width}"));
@@ -284,6 +290,7 @@ struct Imported {
     smart_sizing: bool,
     color_depth: Option<u8>,
     admin_session: bool,
+    auto_reconnect: bool,
     certificate_policy: CertificatePolicy,
     network_profile: NetworkProfile,
     gateway: Option<String>,
@@ -333,6 +340,7 @@ impl Imported {
             security: SecurityConfig {
                 certificate_policy: self.certificate_policy,
                 admin_session: self.admin_session,
+                auto_reconnect: self.auto_reconnect,
                 network_profile: self.network_profile,
                 advanced: AdvancedOverrides {
                     freerdp_args: Vec::new(),
@@ -479,6 +487,23 @@ mod tests {
         assert_eq!(profile.identity.username, "bob");
         assert!(profile.devices.audio_playback);
         assert!(profile.display.fullscreen);
+    }
+
+    #[test]
+    fn reconnect_survives_import_and_rdp_export() {
+        for enabled in [false, true] {
+            let profile = import_remmina(
+                &format!(
+                    "[remmina]\nprotocol=RDP\nserver=host\ndisableautoreconnect={}\n",
+                    u8::from(!enabled)
+                ),
+                "sample",
+            )
+            .unwrap();
+            assert_eq!(profile.security.auto_reconnect, enabled);
+            let imported = import_rdp(&export_rdp(&profile), "sample").unwrap();
+            assert_eq!(imported.security.auto_reconnect, enabled);
+        }
     }
 
     #[test]

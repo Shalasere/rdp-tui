@@ -84,6 +84,7 @@ impl Default for DeviceConfig {
 pub struct SecurityConfig {
     pub certificate_policy: CertificatePolicy,
     pub admin_session: bool,
+    pub auto_reconnect: bool,
     pub network_profile: NetworkProfile,
     pub advanced: AdvancedOverrides,
 }
@@ -93,6 +94,7 @@ impl Default for SecurityConfig {
         Self {
             certificate_policy: CertificatePolicy::Tofu,
             admin_session: false,
+            auto_reconnect: false,
             network_profile: NetworkProfile::Auto,
             advanced: AdvancedOverrides::default(),
         }

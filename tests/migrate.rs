@@ -43,3 +43,12 @@ fn rejects_legacy_free_form_options_for_manual_review() {
     let error=import_python_profiles(r#"[{"id":"550e8400-e29b-41d4-a716-446655440000","name":"Anima","host":"10.0.0.111","extra_options":"/cert:ignore"}]"#).unwrap_err();
     assert!(error.to_string().contains("extra_options"));
 }
+
+#[test]
+fn preserves_legacy_reconnect_preference() {
+    let document = import_python_profiles(
+        r#"[{"id":"550e8400-e29b-41d4-a716-446655440000","name":"Anima","host":"host","auto_reconnect":true}]"#,
+    )
+    .unwrap();
+    assert!(document.profiles[0].security.auto_reconnect);
+}

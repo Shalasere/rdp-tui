@@ -476,6 +476,7 @@ fn set_command(
             })?;
         }
         "admin-session" => profile.security.admin_session = fields::parse_bool(new_value)?,
+        "auto-reconnect" => profile.security.auto_reconnect = fields::parse_bool(new_value)?,
         "network" => {
             profile.security.network_profile = NetworkProfile::from_token(new_value).ok_or_else(
                 || {
@@ -490,7 +491,7 @@ fn set_command(
                 "unknown field '{other}' (name | host | username | domain | fullscreen | \
                  renderer | resolution | route | gateway-username | gateway-domain | multimon | span-monitors | smart-sizing | \
                  dynamic-resolution | scale | color-depth | clipboard | audio | microphone | \
-                 printers | graphics | admin-session | network)"
+                 printers | graphics | admin-session | auto-reconnect | network)"
             ));
         }
     }
@@ -716,6 +717,34 @@ mod tests {
             security: SecurityConfig::default(),
             credential: None,
         }
+    }
+
+    #[test]
+    fn reconnect_setting_persists_and_rejects_invalid_values() {
+        let dir = TempDir::new().unwrap();
+        let store = ProfileStore::new(ConfigStore::new(dir.path()));
+        let profile = sample_profile();
+        let id = profile.id;
+        store.upsert(profile).unwrap();
+        for value in ["true", "false"] {
+            super::set_command(&store, dir.path(), &id.to_string(), "auto-reconnect", value)
+                .unwrap();
+            assert_eq!(
+                store.get(id).unwrap().unwrap().security.auto_reconnect,
+                value == "true"
+            );
+        }
+        assert!(
+            super::set_command(
+                &store,
+                dir.path(),
+                &id.to_string(),
+                "auto-reconnect",
+                "invalid"
+            )
+            .is_err()
+        );
+        assert!(!store.get(id).unwrap().unwrap().security.auto_reconnect);
     }
 
     #[test]

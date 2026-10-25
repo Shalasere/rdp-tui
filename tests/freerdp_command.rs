@@ -45,6 +45,39 @@ fn command_uses_prepared_endpoint_and_never_credential_references() {
 }
 
 #[test]
+fn reconnect_uses_a_finite_budget_for_both_renderers_and_can_be_disabled() {
+    for renderer in [Renderer::WaylandSdl, Renderer::X11] {
+        let mut plan = ConnectionPlan {
+            target: "anima:3389".parse().unwrap(),
+            route: PlannedRoute::Direct,
+            identity: IdentityConfig::default(),
+            display: DisplayConfig::default(),
+            devices: DeviceConfig::default(),
+            security: SecurityConfig::default(),
+            credentials: ResolvedCredentials::default(),
+            client: FreeRdpClient {
+                executable: PathBuf::from("unused"),
+                renderer,
+                version: Version::new(3, 32, 2),
+            },
+        };
+        plan.security.auto_reconnect = true;
+        let (_, args, _) = build_command(&prepare(&plan).unwrap());
+        assert!(args.contains(&"+auto-reconnect".into()));
+        assert!(args.contains(&"/auto-reconnect-max-retries:1000".into()));
+        assert!(!args.contains(&"/auto-reconnect-max-retries:0".into()));
+
+        plan.security.auto_reconnect = false;
+        let (_, args, _) = build_command(&prepare(&plan).unwrap());
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("auto-reconnect"))
+        );
+    }
+}
+
+#[test]
 fn command_renders_supported_profile_settings() {
     let mut plan = ConnectionPlan {
         target: "anima:3389".parse().unwrap(),

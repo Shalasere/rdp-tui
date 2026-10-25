@@ -55,6 +55,12 @@ pub fn build_command(
     if plan.security.admin_session {
         args.push("/admin".into());
     }
+    if plan.security.auto_reconnect {
+        args.push("+auto-reconnect".into());
+        // SDL 3.32.2's retry dialog treats 0 (documented as unlimited) as
+        // exhausted immediately. Use a finite budget for both frontends.
+        args.push("/auto-reconnect-max-retries:1000".into());
+    }
     if plan.display.span_monitors {
         args.push("/span".into());
     } else if plan.display.multimon {
