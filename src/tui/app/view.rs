@@ -20,9 +20,9 @@ pub(super) fn draw(app: &mut App, frame: &mut ratatui::Frame) {
         .split(frame.area());
 
     if let Mode::Editing(form) = &app.mode {
-        let list = editing_list(form, theme);
+        let (list, selected_row) = editing_list(form, theme);
         let mut state = ListState::default();
-        state.select(Some(form.field));
+        state.select(Some(selected_row));
         frame.render_stateful_widget(list, areas[0], &mut state);
     } else if let Mode::Status(details) = &mut app.mode {
         let block = panel(format!(" {} ", details.title), theme, theme.border_focused);
@@ -98,25 +98,35 @@ pub(super) fn draw(app: &mut App, frame: &mut ratatui::Frame) {
     }
 }
 
-fn editing_list(form: &super::EditForm, theme: &Theme) -> List<'static> {
-    let items: Vec<ListItem> = FIELDS
-        .iter()
-        .enumerate()
-        .map(|(index, &field)| {
-            let value = if index == form.field && form.editing_text.is_some() {
-                format!("{}_", form.editing_text.as_deref().unwrap_or(""))
-            } else {
-                form.display_value(field)
-            };
-            ListItem::new(Line::from(format!("{:<14} {value}", field.label())))
-        })
-        .collect();
+fn editing_list(form: &super::EditForm, theme: &Theme) -> (List<'static>, usize) {
+    let mut items = Vec::with_capacity(FIELDS.len() + 5);
+    let mut selected_row = 0;
+    for (index, &field) in FIELDS.iter().enumerate() {
+        if index == 0 || field.section() != FIELDS[index - 1].section() {
+            items.push(
+                ListItem::new(Line::from(format!("  ── {} ──", field.section())))
+                    .style(theme.title),
+            );
+        }
+        if index == form.field {
+            selected_row = items.len();
+        }
+        let value = if index == form.field && form.editing_text.is_some() {
+            format!("{}_", form.editing_text.as_deref().unwrap_or(""))
+        } else {
+            form.display_value(field)
+        };
+        items.push(ListItem::new(Line::from(format!(
+            "{:<26} {value}",
+            field.label()
+        ))));
+    }
     let title = if form.target.is_some() {
-        " edit profile "
+        format!(" edit profile · {} ", FIELDS[form.field].section())
     } else {
-        " add profile "
+        format!(" add profile · {} ", FIELDS[form.field].section())
     };
-    List::new(items)
+    let list = List::new(items)
         .style(theme.text)
         .block(panel(title, theme, theme.border_focused))
         .highlight_symbol("> ")
@@ -124,7 +134,8 @@ fn editing_list(form: &super::EditForm, theme: &Theme) -> List<'static> {
             theme.field_focused
         } else {
             theme.selection
-        })
+        });
+    (list, selected_row)
 }
 
 fn footer(app: &App, width: u16) -> Paragraph<'static> {
@@ -157,7 +168,8 @@ fn footer(app: &App, width: u16) -> Paragraph<'static> {
             if form.editing_text.is_some() {
                 " typing · Enter set · Esc cancel field ".to_string()
             } else {
-                " ↑/↓ field · Enter/Space edit · A accept · Esc cancel ".to_string()
+                " ↑/↓ field · Tab/Shift+Tab section · Enter/Space edit · A accept · Esc cancel "
+                    .to_string()
             },
             form.error.clone().unwrap_or_else(|| app.status.clone()),
         ),
@@ -288,7 +300,7 @@ fn update_scroll(details: &mut TextView, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, Mode, Severity, TextView, draw};
+    use super::{App, Mode, PasswordPurpose, Severity, TextView, draw};
     use crate::model::{
         DeviceConfig, DisplayConfig, IdentityConfig, Profile, ProfileId, Route, SecurityConfig,
     };
@@ -524,7 +536,7 @@ modifiers = ["reversed", "dim"]
             for (width, height) in [(80, 24), (100, 25), (40, 12), (20, 6)] {
                 render(&mut app, width, height);
                 app.mode = Mode::Password {
-                    slot: CredentialSlot::Main,
+                    purpose: PasswordPurpose::Save(CredentialSlot::Main),
                     input: "synthetic-secret".to_string().into(),
                 };
                 let buffer = render(&mut app, width, height);

@@ -163,7 +163,7 @@ enum BackgroundResult {
 
 /// Every editable profile field, in the order shown in the form. Matches the set
 /// the CLI `set` command accepts, so the two frontends have parity.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Field {
     Name,
     Host,
@@ -198,23 +198,23 @@ const FIELDS: [Field; 26] = [
     Field::Host,
     Field::Username,
     Field::Domain,
+    Field::Route,
     Field::GatewayUsername,
     Field::GatewayDomain,
-    Field::Route,
     Field::Renderer,
     Field::Fullscreen,
+    Field::SmartSizing,
     Field::Resolution,
     Field::Scale,
-    Field::ColorDepth,
-    Field::Graphics,
     Field::DynamicResolution,
     Field::Multimon,
     Field::SpanMonitors,
-    Field::SmartSizing,
+    Field::ColorDepth,
+    Field::Graphics,
     Field::Certificate,
+    Field::AutosaveSessionPassword,
     Field::AdminSession,
     Field::AutoReconnect,
-    Field::AutosaveSessionPassword,
     Field::Network,
     Field::Clipboard,
     Field::Audio,
@@ -223,6 +223,31 @@ const FIELDS: [Field; 26] = [
 ];
 
 impl Field {
+    const fn section(self) -> &'static str {
+        match self {
+            Self::Name
+            | Self::Host
+            | Self::Username
+            | Self::Domain
+            | Self::Route
+            | Self::GatewayUsername
+            | Self::GatewayDomain => "Connection",
+            Self::Renderer
+            | Self::Fullscreen
+            | Self::SmartSizing
+            | Self::Resolution
+            | Self::Scale
+            | Self::DynamicResolution
+            | Self::Multimon
+            | Self::SpanMonitors
+            | Self::ColorDepth
+            | Self::Graphics => "Display",
+            Self::Certificate | Self::AutosaveSessionPassword => "Security",
+            Self::AdminSession | Self::AutoReconnect | Self::Network => "Session",
+            Self::Clipboard | Self::Audio | Self::Microphone | Self::Printers => "Devices",
+        }
+    }
+
     const fn label(self) -> &'static str {
         match self {
             Self::Name => "Name",
@@ -314,6 +339,29 @@ impl EditForm {
             (self.field + 1) % count
         } else {
             (self.field + count - 1) % count
+        };
+        self.error = None;
+    }
+
+    fn move_section(&mut self, forward: bool) {
+        let current = FIELDS[self.field].section();
+        self.field = if forward {
+            FIELDS
+                .iter()
+                .enumerate()
+                .skip(self.field + 1)
+                .find(|(_, field)| field.section() != current)
+                .map_or(0, |(index, _)| index)
+        } else {
+            let previous_section = FIELDS[..self.field]
+                .iter()
+                .rev()
+                .find(|field| field.section() != current)
+                .map_or_else(|| FIELDS.last().unwrap().section(), |field| field.section());
+            FIELDS
+                .iter()
+                .position(|field| field.section() == previous_section)
+                .unwrap_or(0)
         };
         self.error = None;
     }
@@ -1034,6 +1082,16 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Mode::Editing(form) = &mut self.mode {
                     form.move_field(false);
+                }
+            }
+            KeyCode::Tab => {
+                if let Mode::Editing(form) = &mut self.mode {
+                    form.move_section(true);
+                }
+            }
+            KeyCode::BackTab => {
+                if let Mode::Editing(form) = &mut self.mode {
+                    form.move_section(false);
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ' | 'e') => self.activate_field(),
@@ -2538,5 +2596,33 @@ mod tests {
         assert_eq!(form.draft.identity.username, "operator");
         assert_eq!(form.draft.display.renderer, Renderer::WaylandSdl);
         assert!(form.target.is_some());
+    }
+
+    #[test]
+    fn editor_sections_render_and_navigation_skips_dividers() {
+        let mut app = app_with(&[]);
+        app.mode = Mode::Editing(Box::new(EditForm::blank()));
+        let screen = rendered(&mut app, 80, 42);
+        for section in ["Connection", "Display", "Security", "Session", "Devices"] {
+            assert!(screen.contains(&format!("── {section} ──")));
+        }
+        let Mode::Editing(form) = &mut app.mode else {
+            panic!("expected profile editor");
+        };
+        for field in [
+            Field::Renderer,
+            Field::Certificate,
+            Field::AdminSession,
+            Field::Clipboard,
+            Field::Name,
+        ] {
+            form.move_section(true);
+            assert_eq!(FIELDS[form.field], field);
+        }
+        form.move_section(false);
+        assert_eq!(FIELDS[form.field], Field::Clipboard);
+        form.move_field(false);
+        assert_eq!(FIELDS[form.field], Field::Network);
+        rendered(&mut app, 40, 10);
     }
 }

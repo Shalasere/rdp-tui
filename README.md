@@ -52,6 +52,8 @@ at once: select a row, press `Enter` to edit it (or `Space` to toggle an option)
 then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availability
 and the result of the last session; press `s` for the selected profile's detailed
 status screen. Press `q` to quit.
+The editor groups fields under Connection, Display, Security, Session, and Devices.
+Use Up/Down to move by field or Tab/Shift+Tab to jump between groups.
 
 **Autosave session password** defaults to **Yes**. When a profile has no saved
 password, connecting from the TUI asks for it and keeps it in memory for that
