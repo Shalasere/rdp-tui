@@ -130,8 +130,8 @@ impl Route {
     }
 }
 
-/// The scale-percent choices the validator accepts, plus the monitor default.
-pub const SCALE_CHOICES: [Option<u16>; 4] = [None, Some(100), Some(140), Some(180)];
+/// The scale-percent choices shown in the profile form.
+pub const SCALE_CHOICES: [Option<u16>; 3] = [Some(100), Some(140), Some(180)];
 
 /// The color-depth choices the validator accepts, plus the client default.
 pub const COLOR_DEPTH_CHOICES: [Option<u8>; 6] =
@@ -156,22 +156,22 @@ pub fn parse_bool(value: &str) -> Result<bool, String> {
     }
 }
 
-/// Render a resolution as `WIDTHxHEIGHT`, or `none` for the monitor default.
+/// Render a forced resolution as `WIDTHxHEIGHT`, or `off` for automatic sizing.
 #[must_use]
 pub fn format_resolution(resolution: Option<(u16, u16)>) -> String {
     match resolution {
         Some((width, height)) => format!("{width}x{height}"),
-        None => "none".to_owned(),
+        None => "off".to_owned(),
     }
 }
 
-/// Parse `WIDTHxHEIGHT`, or `none`/empty for the monitor default.
+/// Parse `WIDTHxHEIGHT`, or `off`/`none`/empty for automatic sizing.
 ///
 /// # Errors
 ///
 /// Returns a message when the token is not a valid `WIDTHxHEIGHT` pair.
 pub fn parse_resolution(value: &str) -> Result<Option<(u16, u16)>, String> {
-    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+    if value.is_empty() || value.eq_ignore_ascii_case("off") || value.eq_ignore_ascii_case("none") {
         return Ok(None);
     }
     let (width, height) = value
@@ -188,15 +188,16 @@ pub fn parse_resolution(value: &str) -> Result<Option<(u16, u16)>, String> {
     Ok(Some((width, height)))
 }
 
-/// Render a scale percent as `140%`, or `auto` for the monitor default.
+/// Render a scale percent. Older profiles with no saved scale use 100%.
 #[must_use]
 pub fn format_scale(scale: Option<u16>) -> String {
-    scale.map_or_else(|| "auto".to_owned(), |percent| format!("{percent}%"))
+    format!("{}%", scale.unwrap_or(100))
 }
 
 /// The next accepted scale, wrapping — for a cycle control.
 #[must_use]
 pub fn cycle_scale(current: Option<u16>) -> Option<u16> {
+    let current = current.or(Some(100));
     cycle_choice(&SCALE_CHOICES, current)
 }
 
@@ -372,16 +373,19 @@ mod tests {
     fn resolution_and_bool_parse() {
         assert_eq!(parse_resolution("1920x1080").unwrap(), Some((1920, 1080)));
         assert_eq!(parse_resolution("none").unwrap(), None);
+        assert_eq!(parse_resolution("off").unwrap(), None);
         assert!(parse_resolution("wide").is_err());
         assert_eq!(format_resolution(Some((800, 600))), "800x600");
+        assert_eq!(format_resolution(None), "off");
         assert!(parse_bool("yes").unwrap());
         assert!(!parse_bool("off").unwrap());
     }
 
     #[test]
     fn scale_cycles_through_the_accepted_set() {
-        assert_eq!(cycle_scale(None), Some(100));
+        assert_eq!(super::format_scale(None), "100%");
+        assert_eq!(cycle_scale(None), Some(140));
         assert_eq!(cycle_scale(Some(100)), Some(140));
-        assert_eq!(cycle_scale(Some(180)), None);
+        assert_eq!(cycle_scale(Some(180)), Some(100));
     }
 }

@@ -453,7 +453,9 @@ fn set_command(
             Route::RdGateway { domain, .. } => new_value.clone_into(domain),
             _ => return Err("set route to gateway:<host> before setting gateway-domain".into()),
         },
-        "fullscreen" => profile.display.fullscreen = fields::parse_bool(new_value)?,
+        "fullscreen" => profile
+            .display
+            .set_fullscreen(fields::parse_bool(new_value)?),
         "renderer" => {
             profile.display.renderer = Renderer::from_token(new_value)
                 .ok_or_else(|| format!("unknown renderer '{new_value}' (use wayland_sdl | x11)"))?;
@@ -477,6 +479,9 @@ fn set_command(
         }
         "admin-session" => profile.security.admin_session = fields::parse_bool(new_value)?,
         "auto-reconnect" => profile.security.auto_reconnect = fields::parse_bool(new_value)?,
+        "autosave-session-password" => {
+            profile.security.autosave_session_password = fields::parse_bool(new_value)?;
+        }
         "network" => {
             profile.security.network_profile = NetworkProfile::from_token(new_value).ok_or_else(
                 || {
@@ -491,7 +496,7 @@ fn set_command(
                 "unknown field '{other}' (name | host | username | domain | fullscreen | \
                  renderer | resolution | route | gateway-username | gateway-domain | multimon | span-monitors | smart-sizing | \
                  dynamic-resolution | scale | color-depth | clipboard | audio | microphone | \
-                 printers | graphics | admin-session | auto-reconnect | network)"
+                 printers | graphics | admin-session | auto-reconnect | autosave-session-password | network)"
             ));
         }
     }
@@ -820,6 +825,7 @@ mod tests {
         super::set_command(&store, dir.path(), &id, "route", "ssh:jump.example").unwrap();
         super::set_command(&store, dir.path(), &id, "multimon", "yes").unwrap();
         super::set_command(&store, dir.path(), &id, "scale", "140").unwrap();
+        super::set_command(&store, dir.path(), &id, "autosave-session-password", "off").unwrap();
         super::set_command(&store, dir.path(), &id, "audio", "off").unwrap();
         // The store rejects an out-of-range scale rather than corrupting the profile.
         assert!(super::set_command(&store, dir.path(), &id, "scale", "150").is_err());
@@ -831,10 +837,25 @@ mod tests {
         assert!(matches!(saved.route, Route::SshTunnel { .. }));
         assert!(saved.display.multimon);
         assert_eq!(saved.display.scale_percent, Some(140));
+        assert!(!saved.security.autosave_session_password);
         assert!(!saved.devices.audio_playback);
 
         assert!(super::set_command(&store, dir.path(), &id, "route", "bogus").is_err());
         assert!(super::set_command(&store, dir.path(), &id, "nonesuch", "x").is_err());
+    }
+
+    #[test]
+    fn setting_windowed_mode_enables_smart_sizing() {
+        let dir = TempDir::new().unwrap();
+        let store = ProfileStore::new(ConfigStore::new(dir.path()));
+        super::add_command(&store, "Windowed", "10.0.0.9").unwrap();
+        let id = store.list().unwrap()[0].id;
+        super::set_command(&store, dir.path(), &id.to_string(), "fullscreen", "no").unwrap();
+
+        let saved = store.get(id).unwrap().unwrap();
+        assert!(!saved.display.fullscreen);
+        assert!(saved.display.smart_sizing);
+        assert!(!saved.display.dynamic_resolution);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Pure rendering for the TUI, separated from controller and state transitions.
 
-use super::{App, FIELDS, Mode, Severity, TextView};
+use super::{App, FIELDS, Mode, PasswordPurpose, Severity, TextView};
 use crate::tui::theme::Theme;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -133,8 +133,12 @@ fn footer(app: &App, width: u16) -> Paragraph<'static> {
             " Enter connect · a/e add/edit · c clone · d delete · f find · i/x import/export · s status · h history · m messages · t test · D deep-test · p/g pass · T cert · ? help · q quit ".to_string(),
             app.status.clone(),
         ),
-        Mode::Password { input, .. } => (
-            " typing password · Enter save · Esc cancel ".to_string(),
+        Mode::Password { input, purpose } => (
+            match purpose {
+                PasswordPurpose::Save(_) => " typing password · Enter save · Esc cancel ",
+                PasswordPurpose::Connect(_) => " typing password · Enter connect · Esc cancel ",
+            }
+            .to_string(),
             format!("Password: {}", "*".repeat(input.chars().count())),
         ),
         Mode::Prompt { label, input, .. } => (

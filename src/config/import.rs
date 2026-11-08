@@ -341,6 +341,7 @@ impl Imported {
                 certificate_policy: self.certificate_policy,
                 admin_session: self.admin_session,
                 auto_reconnect: self.auto_reconnect,
+                autosave_session_password: true,
                 network_profile: self.network_profile,
                 advanced: AdvancedOverrides {
                     freerdp_args: Vec::new(),

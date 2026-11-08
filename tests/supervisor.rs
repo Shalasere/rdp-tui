@@ -1,8 +1,8 @@
 use rdp_tui::credentials::{CredentialError, CredentialStore};
 use rdp_tui::model::{
     ConnectionFailure, ConnectionPlan, CredentialRef, DeviceConfig, DisplayConfig, FreeRdpClient,
-    IdentityConfig, PlannedRoute, ProfileId, Renderer, ResolvedCredentials, SecurityConfig,
-    SessionId,
+    IdentityConfig, PlannedRoute, Profile, ProfileId, Renderer, ResolvedCredentials, Route,
+    SecurityConfig, SessionId,
 };
 use rdp_tui::session::record::read;
 use rdp_tui::session::supervisor::supervise;
@@ -13,6 +13,85 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
+
+#[test]
+fn first_use_password_is_saved_only_after_an_established_session_when_enabled() {
+    for (autosave, accepted, rejected_once, should_save) in [
+        (true, true, false, true),
+        (false, true, false, false),
+        (true, false, false, false),
+        (true, true, true, false),
+    ] {
+        let temporary = TempDir::new().unwrap();
+        let executable = temporary.path().join("fake-freerdp");
+        let outcome = if rejected_once {
+            "echo 'ERRCONNECT_LOGON_FAILURE' >&2; echo 'Local framebuffer format' >&2; exit 0"
+        } else if accepted {
+            "echo 'Local framebuffer format' >&2; exit 0"
+        } else {
+            "echo 'ERRCONNECT_LOGON_FAILURE' >&2; exit 1"
+        };
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\ntest \"$(\"$FREERDP_ASKPASS\" Password:)\" = temporary-pass || exit 9\n{outcome}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let profile = Profile {
+            id: ProfileId::generate(),
+            name: "First use".into(),
+            endpoint: endpoint.parse().unwrap(),
+            identity: IdentityConfig::default(),
+            route: Route::Direct,
+            display: DisplayConfig::default(),
+            devices: DeviceConfig::default(),
+            security: SecurityConfig {
+                autosave_session_password: autosave,
+                ..SecurityConfig::default()
+            },
+            credential: None,
+        };
+        let config_root = temporary.path().join("config");
+        let profile_store =
+            rdp_tui::ProfileStore::new(rdp_tui::config::ConfigStore::new(&config_root));
+        profile_store.upsert(profile.clone()).unwrap();
+        let plan = ConnectionPlan {
+            target: profile.endpoint.clone(),
+            route: PlannedRoute::Direct,
+            identity: profile.identity.clone(),
+            display: profile.display.clone(),
+            devices: profile.devices.clone(),
+            security: profile.security.clone(),
+            credentials: ResolvedCredentials::default(),
+            client: FreeRdpClient {
+                executable,
+                renderer: Renderer::X11,
+                version: Version::new(3, 30, 0),
+            },
+        };
+        let result = supervise(
+            &plan,
+            profile.id,
+            SessionId::generate(),
+            &NoCredentials,
+            Path::new(env!("CARGO_BIN_EXE_rdp-tui")),
+            &config_root,
+            temporary.path(),
+            temporary.path(),
+            Duration::from_secs(2),
+            Some(SecretString::from("temporary-pass")),
+        )
+        .unwrap();
+        assert_eq!(result.established, accepted);
+        let saved = profile_store.get(profile.id).unwrap().unwrap();
+        assert_eq!(saved.credential.is_some(), should_save);
+        drop(listener);
+    }
+}
 
 struct NoCredentials;
 
@@ -66,6 +145,7 @@ fn supervise_runs_a_direct_session_and_clears_its_record() {
         records.path(),
         state.path(),
         Duration::from_secs(2),
+        None,
     )
     .unwrap();
 
@@ -132,6 +212,7 @@ fn supervise_interrupts_a_changed_certificate_and_reports_it() {
         records.path(),
         state.path(),
         Duration::from_secs(2),
+        None,
     )
     .unwrap();
 
@@ -220,6 +301,7 @@ fn supervisor_distinguishes_rejected_credentials_from_an_abort_with_the_same_exi
                 records.path(),
                 state.path(),
                 Duration::from_secs(2),
+                None,
             )
         };
         let result = run(session).unwrap();

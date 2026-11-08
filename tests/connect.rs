@@ -3,6 +3,7 @@ use rdp_tui::model::{
     ProfileId, Renderer, ResolvedCredentials, SecurityConfig, SessionId,
 };
 use rdp_tui::session::launcher::spawn_supervisor;
+use secrecy::SecretString;
 use semver::Version;
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
@@ -20,7 +21,10 @@ fn spawn_supervisor_launches_a_detached_session_via_the_real_binary() {
     let freerdp = dir.path().join("fake-freerdp");
     std::fs::write(
         &freerdp,
-        format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+        format!(
+            "#!/bin/sh\ntest \"$(\"$FREERDP_ASKPASS\" Password:)\" = temporary-pass || exit 9\ntouch '{}'\nexit 0\n",
+            marker.display()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&freerdp, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -50,6 +54,7 @@ fn spawn_supervisor_launches_a_detached_session_via_the_real_binary() {
         ProfileId::generate(),
         SessionId::generate(),
         executable,
+        Some(&SecretString::from("temporary-pass")),
     )
     .unwrap();
 

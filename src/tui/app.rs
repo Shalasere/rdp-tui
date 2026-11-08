@@ -18,12 +18,14 @@ use crate::model::{
 use crate::operations::{self, CredentialSlot};
 use crate::profile_store::ProfileStore;
 use crate::session::{
-    DEEP_TEST_WARNING, connect_profile, deep_test_requires_acknowledgement, test_profile,
+    DEEP_TEST_WARNING, connect_profile, connect_profile_with_password,
+    deep_test_requires_acknowledgement, test_profile,
 };
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
+use secrecy::SecretString;
 use secrecy::zeroize::Zeroizing;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -74,7 +76,7 @@ enum PromptAction {
 enum Mode {
     Browsing,
     Password {
-        slot: CredentialSlot,
+        purpose: PasswordPurpose,
         input: Zeroizing<String>,
     },
     Prompt {
@@ -86,6 +88,12 @@ enum Mode {
     /// Read-only, scrollable details; explicit dismissal returns to browsing.
     Status(TextView),
     CertificateMismatch(crate::freerdp::certificate::CertificateMismatch),
+}
+
+#[derive(Clone, Copy)]
+enum PasswordPurpose {
+    Save(CredentialSlot),
+    Connect(ProfileId),
 }
 
 /// A modal message; scrolling bounds are refreshed when the terminal is resized.
@@ -177,6 +185,7 @@ enum Field {
     Certificate,
     AdminSession,
     AutoReconnect,
+    AutosaveSessionPassword,
     Network,
     Clipboard,
     Audio,
@@ -184,7 +193,7 @@ enum Field {
     Printers,
 }
 
-const FIELDS: [Field; 25] = [
+const FIELDS: [Field; 26] = [
     Field::Name,
     Field::Host,
     Field::Username,
@@ -205,6 +214,7 @@ const FIELDS: [Field; 25] = [
     Field::Certificate,
     Field::AdminSession,
     Field::AutoReconnect,
+    Field::AutosaveSessionPassword,
     Field::Network,
     Field::Clipboard,
     Field::Audio,
@@ -224,8 +234,8 @@ impl Field {
             Self::Route => "Route",
             Self::Renderer => "Renderer",
             Self::Fullscreen => "Fullscreen",
-            Self::Resolution => "Resolution",
-            Self::Scale => "Scale",
+            Self::Resolution => "Forced resolution",
+            Self::Scale => "Display scale",
             Self::ColorDepth => "Color depth",
             Self::Graphics => "Graphics",
             Self::DynamicResolution => "Dynamic res",
@@ -235,6 +245,7 @@ impl Field {
             Self::Certificate => "Certificate",
             Self::AdminSession => "Admin session",
             Self::AutoReconnect => "Auto reconnect",
+            Self::AutosaveSessionPassword => "Autosave session password",
             Self::Network => "Network",
             Self::Clipboard => "Clipboard",
             Self::Audio => "Audio",
@@ -341,6 +352,9 @@ impl EditForm {
             Field::AutoReconnect => {
                 fields::format_bool(self.draft.security.auto_reconnect).to_owned()
             }
+            Field::AutosaveSessionPassword => {
+                fields::format_bool(self.draft.security.autosave_session_password).to_owned()
+            }
             Field::Network => self.draft.security.network_profile.token().to_owned(),
             Field::Clipboard => fields::format_bool(self.draft.devices.clipboard).to_owned(),
             Field::Audio => fields::format_bool(self.draft.devices.audio_playback).to_owned(),
@@ -418,11 +432,16 @@ impl EditForm {
             }
             Field::AdminSession => toggle(&mut self.draft.security.admin_session),
             Field::AutoReconnect => toggle(&mut self.draft.security.auto_reconnect),
+            Field::AutosaveSessionPassword => {
+                toggle(&mut self.draft.security.autosave_session_password);
+            }
             Field::Network => {
                 let network = &mut self.draft.security.network_profile;
                 *network = network.cycled();
             }
-            Field::Fullscreen => toggle(&mut display.fullscreen),
+            Field::Fullscreen => {
+                display.set_fullscreen(!display.fullscreen);
+            }
             Field::DynamicResolution => toggle(&mut display.dynamic_resolution),
             Field::Multimon => toggle(&mut display.multimon),
             Field::SpanMonitors => toggle(&mut display.span_monitors),
@@ -695,6 +714,10 @@ impl App {
             ));
             false
         });
+        if !notifications.is_empty() {
+            // A detached supervisor may have saved a first-use password.
+            self.reload();
+        }
         for (message, failed, action_failed, session, name) in notifications {
             if failed {
                 self.retain_message(message.clone(), Some(session));
@@ -1424,7 +1447,27 @@ impl App {
         let Some(profile) = self.current().cloned() else {
             return;
         };
-        match connect_profile(&profile, &self.executable) {
+        if profile.credential.is_none() {
+            self.mode = Mode::Password {
+                purpose: PasswordPurpose::Connect(profile.id),
+                input: Zeroizing::new(String::new()),
+            };
+            self.status = format!(
+                "Password for {} — Enter to connect, Esc to cancel",
+                profile.name
+            );
+            return;
+        }
+        self.start_connection(&profile, None);
+    }
+
+    fn start_connection(&mut self, profile: &Profile, password: Option<&SecretString>) {
+        let result = if let Some(password) = password {
+            connect_profile_with_password(profile, &self.executable, password)
+        } else {
+            connect_profile(profile, &self.executable)
+        };
+        match result {
             Ok(session) => {
                 self.launched_sessions.push(WatchedSession {
                     id: session,
@@ -1541,7 +1584,7 @@ impl App {
         }
         let name = profile.name.clone();
         self.mode = Mode::Password {
-            slot,
+            purpose: PasswordPurpose::Save(slot),
             input: Zeroizing::new(String::new()),
         };
         let label = if slot == CredentialSlot::Main {
@@ -1556,11 +1599,30 @@ impl App {
     }
 
     fn commit_password(&mut self) {
-        let (slot, password) = match &self.mode {
-            Mode::Password { slot, input } => (*slot, input.to_string()),
+        let (purpose, password) = match &self.mode {
+            Mode::Password { purpose, input } => (*purpose, Zeroizing::new(input.to_string())),
             _ => return,
         };
         self.mode = Mode::Browsing;
+        if let PasswordPurpose::Connect(id) = purpose {
+            if password.is_empty() {
+                self.status = "Connection cancelled: no password entered.".into();
+                return;
+            }
+            if let Some(profile) = self
+                .profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .cloned()
+            {
+                let secret = SecretString::from(password.to_string());
+                self.start_connection(&profile, Some(&secret));
+            }
+            return;
+        }
+        let PasswordPurpose::Save(slot) = purpose else {
+            return;
+        };
         let Some(index) = self.current_index() else {
             return;
         };
@@ -1708,8 +1770,8 @@ fn profile_matches(profile: &Profile, query: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, BackgroundResult, CredentialSlot, EditForm, FIELDS, Field, Mode, PromptAction,
-        Severity, TextView,
+        App, BackgroundResult, CredentialSlot, EditForm, FIELDS, Field, Mode, PasswordPurpose,
+        PromptAction, Severity, TextView,
     };
     use crate::config::ConfigStore;
     use crate::model::{
@@ -2112,6 +2174,37 @@ mod tests {
         assert!(!screen.contains("secret"));
     }
 
+    #[test]
+    fn first_connection_prompts_without_storing_a_password() {
+        let (dir, mut app) = app_on_disk(&["First use"]);
+        let id = app.profiles[0].id;
+        assert!(app.profiles[0].security.autosave_session_password);
+        app.connect();
+        assert!(matches!(
+            app.mode,
+            Mode::Password {
+                purpose: PasswordPurpose::Connect(_),
+                ..
+            }
+        ));
+        assert!(
+            ProfileStore::new(ConfigStore::new(dir.path()))
+                .get(id)
+                .unwrap()
+                .unwrap()
+                .credential
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn autosave_setting_is_enabled_by_default_and_can_be_disabled_in_the_form() {
+        let mut form = EditForm::blank();
+        assert_eq!(form.display_value(Field::AutosaveSessionPassword), "yes");
+        form.cycle(Field::AutosaveSessionPassword);
+        assert_eq!(form.display_value(Field::AutosaveSessionPassword), "no");
+    }
+
     fn sample_profile() -> Profile {
         Profile {
             id: ProfileId::generate(),
@@ -2271,6 +2364,20 @@ mod tests {
         assert!(saved.security.auto_reconnect);
         assert_eq!(saved.display.graphics, GraphicsMode::Rfx);
         assert!(matches!(saved.route, Route::SshTunnel { .. }));
+    }
+
+    #[test]
+    fn windowed_form_defaults_to_smart_sizing_and_clear_display_labels() {
+        let mut form = EditForm::blank();
+        assert_eq!(Field::Resolution.label(), "Forced resolution");
+        assert_eq!(form.display_value(Field::Resolution), "off");
+        assert_eq!(form.display_value(Field::Scale), "100%");
+
+        form.draft.display.dynamic_resolution = true;
+        form.cycle(Field::Fullscreen);
+        assert!(!form.draft.display.fullscreen);
+        assert!(form.draft.display.smart_sizing);
+        assert!(!form.draft.display.dynamic_resolution);
     }
 
     #[test]

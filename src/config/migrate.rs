@@ -138,6 +138,7 @@ fn convert(index: usize, source: PythonProfile) -> Result<Profile, StoreError> {
         },
         admin_session: source.admin_session,
         auto_reconnect: source.auto_reconnect,
+        autosave_session_password: true,
         network_profile: match source.network_type.as_str() {
             "modem" => crate::model::NetworkProfile::Modem,
             "broadband-low" => crate::model::NetworkProfile::BroadbandLow,

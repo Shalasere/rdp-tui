@@ -12,6 +12,8 @@ use crate::runtime::process::{LaunchMode, spawn_child};
 use crate::runtime::registry::ChildKind;
 use crate::session::record::{self, SessionRecord, SessionRecordState};
 use crate::session::supervisor::supervise;
+use secrecy::zeroize::Zeroizing;
+use secrecy::{ExposeSecret as _, SecretString};
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, RawFd};
@@ -23,6 +25,7 @@ use std::time::Duration;
 const PLAN_FD: &str = "RDP_TUI_PLAN_FD";
 const SESSION_ID: &str = "RDP_TUI_SESSION_ID";
 const PROFILE_ID: &str = "RDP_TUI_PROFILE_ID";
+const PASSWORD_FD: &str = "RDP_TUI_PASSWORD_FD";
 const SUPERVISE_ARG: &str = "__supervise";
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PLAN_BYTES: usize = 1024 * 1024;
@@ -40,8 +43,20 @@ pub fn spawn_supervisor(
     profile_id: ProfileId,
     session: SessionId,
     executable: &Path,
+    password: Option<&SecretString>,
 ) -> std::io::Result<()> {
+    if let Some(password) = password {
+        let length = password.expose_secret().len();
+        if length == 0 || length > 4096 {
+            return Err(std::io::Error::other(
+                "password length must be 1–4096 bytes",
+            ));
+        }
+    }
     let (read_end, write_end) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+    let password_pipe = password
+        .map(|_| rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC))
+        .transpose()?;
     let mut command = Command::new(executable);
     command.arg(SUPERVISE_ARG);
     // Detached owners must not read from or write onto the launcher's terminal.
@@ -54,6 +69,10 @@ pub fn spawn_supervisor(
     command.env(SESSION_ID, session.to_string());
     command.env(PROFILE_ID, profile_id.to_string());
     inherit_fd_for_exec(&mut command, read_end.as_raw_fd());
+    if let Some((secret_read, _)) = &password_pipe {
+        command.env(PASSWORD_FD, secret_read.as_raw_fd().to_string());
+        inherit_fd_for_exec(&mut command, secret_read.as_raw_fd());
+    }
     crate::diagnostics::configure_command(&mut command);
     // The supervisor must outlive this launcher: detached, no parent-death signal.
     let child = spawn_child(
@@ -90,6 +109,17 @@ pub fn spawn_supervisor(
         writer.flush()?;
         drop(writer);
         drop(read_end);
+        if let (Some(password), Some((secret_read, secret_write))) = (password, password_pipe) {
+            let bytes = password.expose_secret().as_bytes();
+            let length = u32::try_from(bytes.len())
+                .map_err(|_| std::io::Error::other("password is too long"))?;
+            let mut writer = File::from(secret_write);
+            writer.write_all(&length.to_le_bytes())?;
+            writer.write_all(bytes)?;
+            writer.flush()?;
+            drop(writer);
+            drop(secret_read);
+        }
         Ok(())
     })();
     if handoff.is_err() {
@@ -115,6 +145,15 @@ pub fn run_from_environment() -> std::io::Result<()> {
         .parse()
         .map_err(|_| std::io::Error::other("invalid supervised profile id"))?;
     let plan = read_plan(fd)?;
+    let password = std::env::var(PASSWORD_FD)
+        .ok()
+        .map(|fd| {
+            let fd = fd
+                .parse()
+                .map_err(|_| std::io::Error::other("invalid password descriptor"))?;
+            read_password(fd)
+        })
+        .transpose()?;
     let config_root = crate::paths::config_root();
     let store = crate::credentials::SystemCredentialStore::new(&config_root);
     let helper = std::env::current_exe()?;
@@ -130,9 +169,27 @@ pub fn run_from_environment() -> std::io::Result<()> {
         &records,
         &state,
         PREFLIGHT_TIMEOUT,
+        password,
     )
     .map(|_result| ())
     .map_err(std::io::Error::other)
+}
+
+#[allow(unsafe_code)]
+fn read_password(fd: RawFd) -> std::io::Result<SecretString> {
+    // SAFETY: this is the supervisor's uniquely inherited password pipe.
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let mut length = [0u8; 4];
+    file.read_exact(&mut length)?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length == 0 || length > 4096 {
+        return Err(std::io::Error::other("invalid password length"));
+    }
+    let mut bytes = Zeroizing::new(vec![0u8; length]);
+    file.read_exact(&mut bytes)?;
+    let password =
+        std::str::from_utf8(&bytes).map_err(|_| std::io::Error::other("password is not UTF-8"))?;
+    Ok(SecretString::from(password.to_owned()))
 }
 
 fn env_var(name: &str) -> std::io::Result<String> {

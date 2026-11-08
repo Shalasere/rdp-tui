@@ -56,6 +56,18 @@ impl Default for DisplayConfig {
     }
 }
 
+impl DisplayConfig {
+    /// Use smart sizing when switching to a windowed desktop. Advanced display
+    /// options can still be changed separately after this choice.
+    pub fn set_fullscreen(&mut self, fullscreen: bool) {
+        self.fullscreen = fullscreen;
+        self.smart_sizing = !fullscreen;
+        if self.smart_sizing {
+            self.dynamic_resolution = false;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Binding shape is specified by 01-types.yaml.
@@ -85,6 +97,7 @@ pub struct SecurityConfig {
     pub certificate_policy: CertificatePolicy,
     pub admin_session: bool,
     pub auto_reconnect: bool,
+    pub autosave_session_password: bool,
     pub network_profile: NetworkProfile,
     pub advanced: AdvancedOverrides,
 }
@@ -95,6 +108,7 @@ impl Default for SecurityConfig {
             certificate_policy: CertificatePolicy::Tofu,
             admin_session: false,
             auto_reconnect: false,
+            autosave_session_password: true,
             network_profile: NetworkProfile::Auto,
             advanced: AdvancedOverrides::default(),
         }

@@ -11,14 +11,15 @@ use crate::freerdp::deep_test::{AuthOutcome, authenticate};
 use crate::freerdp::discover::discover;
 use crate::freerdp::process::launch;
 use crate::model::{
-    ConnectionFailure, ConnectionPlan, PreparedConnection, Profile, ProfileId, Renderer,
-    ResolvedCredentials, RouteHandle, SessionId, SessionResult,
+    ConnectionFailure, ConnectionPlan, DisplayConfig, PreparedConnection, Profile, ProfileId,
+    Renderer, ResolvedCredentials, RouteHandle, SessionId, SessionResult,
 };
 use crate::planner::plan;
 use crate::preflight::{PreflightError, prepare_for_session, verify_prepared};
 use crate::runtime::process::LaunchMode;
 use crate::runtime::registry::still_matches;
 use crate::ssh::tunnel::terminate;
+use secrecy::SecretString;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -149,32 +150,70 @@ fn run_with_askpass(
 /// Returns [`ConnectError`] when the profile cannot be planned or the detached
 /// supervisor cannot be spawned.
 pub fn connect_profile(profile: &Profile, executable: &Path) -> Result<SessionId, ConnectError> {
+    connect_profile_inner(profile, executable, None)
+}
+
+/// Launch a session with a password held only for this attempt. The detached
+/// supervisor may persist it after a successful login if the profile allows it.
+///
+/// # Errors
+///
+/// Returns [`ConnectError`] if planning or the secure handoff fails.
+pub fn connect_profile_with_password(
+    profile: &Profile,
+    executable: &Path,
+    password: &SecretString,
+) -> Result<SessionId, ConnectError> {
+    connect_profile_inner(profile, executable, Some(password))
+}
+
+fn connect_profile_inner(
+    profile: &Profile,
+    executable: &Path,
+    password: Option<&SecretString>,
+) -> Result<SessionId, ConnectError> {
     if let Some(session) = active_session_for_profile(&record::sessions_dir(), profile.id) {
         return Err(ConnectError::AlreadyRunning(session));
     }
     let mut plan = plan_profile(profile)?;
-    fill_sdl_fullscreen_size(&mut plan);
+    fill_auto_resolution(&mut plan);
     let session = SessionId::generate();
-    launcher::spawn_supervisor(&plan, profile.id, session, executable).map_err(ConnectError::Io)?;
+    launcher::spawn_supervisor(&plan, profile.id, session, executable, password)
+        .map_err(ConnectError::Io)?;
     Ok(session)
 }
 
-/// SDL fullscreen cannot use `FreeRDP`'s `/f` (it reads a 64x64 monitor and fails
-/// pre-connect), so give it the focused monitor's resolution as an explicit
-/// `/size`, matching the Python client. Falls back to 1920x1080 if the monitor
-/// cannot be detected. Runs in the graphical launcher, before the plan is sent
-/// to the detached supervisor.
-fn fill_sdl_fullscreen_size(plan: &mut ConnectionPlan) {
-    if plan.display.fullscreen
-        && matches!(plan.client.renderer, Renderer::WaylandSdl)
-        && plan.display.resolution.is_none()
-    {
-        plan.display.resolution = Some(detect_primary_resolution().unwrap_or((1920, 1080)));
+/// Give auto-sized windows an initial desktop size before `FreeRDP` maps them.
+/// Windowed clients use the monitor's logical work area, which accounts for
+/// compositor scale. Smart sizing keeps a physical-size remote desktop and
+/// scales it into the window. SDL fullscreen also uses the physical size because
+/// its `/f` monitor probe reports 64x64 on Wayland. Runs in the graphical launcher.
+fn fill_auto_resolution(plan: &mut ConnectionPlan) {
+    if should_auto_size(&plan.display, plan.client.renderer) {
+        let use_physical_size = use_physical_size(&plan.display);
+        let fallback = if use_physical_size {
+            (1920, 1080)
+        } else {
+            (1280, 720)
+        };
+        plan.display.resolution =
+            Some(detect_primary_resolution(use_physical_size).unwrap_or(fallback));
     }
 }
 
-/// Return the focused Hyprland monitor's physical resolution via `hyprctl`.
-fn detect_primary_resolution() -> Option<(u16, u16)> {
+fn use_physical_size(display: &DisplayConfig) -> bool {
+    display.fullscreen || display.smart_sizing
+}
+
+fn should_auto_size(display: &DisplayConfig, renderer: Renderer) -> bool {
+    display.resolution.is_none()
+        && !display.multimon
+        && !display.span_monitors
+        && (!display.fullscreen || matches!(renderer, Renderer::WaylandSdl))
+}
+
+/// Return the focused Hyprland monitor's physical or logical work-area size.
+fn detect_primary_resolution(physical: bool) -> Option<(u16, u16)> {
     let output = std::process::Command::new("hyprctl")
         .args(["monitors", "-j"])
         .output()
@@ -188,8 +227,31 @@ fn detect_primary_resolution() -> Option<(u16, u16)> {
         .iter()
         .find(|entry| entry.get("focused").and_then(serde_json::Value::as_bool) == Some(true))
         .or_else(|| list.first())?;
-    let width = u16::try_from(monitor.get("width")?.as_u64()?).ok()?;
-    let height = u16::try_from(monitor.get("height")?.as_u64()?).ok()?;
+    monitor_resolution(monitor, physical)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Saturated or invalid results fail the range check below.
+fn monitor_resolution(monitor: &serde_json::Value, physical: bool) -> Option<(u16, u16)> {
+    let mut width = u16::try_from(monitor.get("width")?.as_u64()?).ok()?;
+    let mut height = u16::try_from(monitor.get("height")?.as_u64()?).ok()?;
+    if !physical {
+        let scale = monitor.get("scale")?.as_f64()?;
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        width = (f64::from(width) / scale).round() as u16;
+        height = (f64::from(height) / scale).round() as u16;
+        if let Some(reserved) = monitor
+            .get("reserved")
+            .and_then(serde_json::Value::as_array)
+            && reserved.len() == 4
+        {
+            let side = reserved[0].as_u64().unwrap_or(0) + reserved[2].as_u64().unwrap_or(0);
+            let vertical = reserved[1].as_u64().unwrap_or(0) + reserved[3].as_u64().unwrap_or(0);
+            width = width.saturating_sub(u16::try_from(side).ok()?);
+            height = height.saturating_sub(u16::try_from(vertical).ok()?);
+        }
+    }
     if (200..=16_384).contains(&width) && (200..=16_384).contains(&height) {
         Some((width, height))
     } else {
@@ -404,16 +466,63 @@ fn active_session_for_profile(dir: &Path, profile_id: ProfileId) -> Option<Sessi
 #[cfg(test)]
 mod tests {
     use super::{
-        DEEP_TEST_INTERVAL, active_session_for_profile, needs_acknowledgement,
-        recently_deep_tested, record, record_deep_test,
+        DEEP_TEST_INTERVAL, active_session_for_profile, monitor_resolution, needs_acknowledgement,
+        recently_deep_tested, record, record_deep_test, should_auto_size, use_physical_size,
     };
-    use crate::model::{ProfileId, SessionId};
+    use crate::model::{DisplayConfig, ProfileId, Renderer, SessionId};
     use crate::runtime::process::{LaunchMode, spawn_child};
     use crate::runtime::registry::ChildKind;
     use std::os::unix::fs::PermissionsExt as _;
     use std::process::Command;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    #[test]
+    fn windowed_size_uses_logical_work_area_except_with_smart_sizing() {
+        let monitor = serde_json::json!({
+            "width": 1920,
+            "height": 1080,
+            "scale": 1.5,
+            "reserved": [0, 18, 0, 0]
+        });
+        assert_eq!(monitor_resolution(&monitor, false), Some((1280, 702)));
+        assert_eq!(monitor_resolution(&monitor, true), Some((1920, 1080)));
+        let windowed = DisplayConfig {
+            fullscreen: false,
+            dynamic_resolution: true,
+            ..DisplayConfig::default()
+        };
+        assert!(!use_physical_size(&windowed));
+        let smart_sizing = DisplayConfig {
+            dynamic_resolution: false,
+            smart_sizing: true,
+            ..windowed
+        };
+        assert!(use_physical_size(&smart_sizing));
+    }
+
+    #[test]
+    fn windowed_auto_resolution_is_initialized_for_both_renderers() {
+        let display = DisplayConfig {
+            fullscreen: false,
+            dynamic_resolution: true,
+            ..DisplayConfig::default()
+        };
+        assert!(should_auto_size(&display, Renderer::WaylandSdl));
+        assert!(should_auto_size(&display, Renderer::X11));
+
+        let explicit = DisplayConfig {
+            resolution: Some((1600, 900)),
+            ..display.clone()
+        };
+        assert!(!should_auto_size(&explicit, Renderer::WaylandSdl));
+
+        let multimon = DisplayConfig {
+            multimon: true,
+            ..display
+        };
+        assert!(!should_auto_size(&multimon, Renderer::WaylandSdl));
+    }
 
     #[test]
     fn active_profile_session_rejects_only_a_live_matching_profile() {

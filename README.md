@@ -53,6 +53,15 @@ then use `A` to accept or `Q` to discard it. The footer shows FreeRDP availabili
 and the result of the last session; press `s` for the selected profile's detailed
 status screen. Press `q` to quit.
 
+**Autosave session password** defaults to **Yes**. When a profile has no saved
+password, connecting from the TUI asks for it and keeps it in memory for that
+session. After the remote desktop establishes successfully and the session ends,
+rdp-tui saves the password for later connections. Set the option to **No** for
+rotating passwords or environments that should never retain one; each connection
+then prompts again. An authentication failure never saves the attempted password.
+An existing saved password can still be cleared with `p` and an empty Enter.
+The same preference is available as `rdp-tui set ID autosave-session-password off`.
+
 Press `i` to import a Remmina profile directory, one `.remmina` file, a `.rdp`
 file, or an rdp-tui JSON profile backup. The import prompt defaults to Remmina's
 standard profile directory when it exists, and unchanged profiles are skipped on
@@ -140,15 +149,14 @@ outcomes appear through the TUI and history, preserving the screen's framing.
 
 ## Advanced RDP settings
 
-The basic form keeps common connection settings concise. Select **Advanced RDP
-settings** only when needed to configure custom or dynamic resolution,
-multi-monitor/span mode, smart sizing, display scale, an existing local folder
-share, microphone redirection, automatic reconnect, a network profile, colour
-depth, or certificate policy. These map directly to documented FreeRDP options.
-When no explicit resolution is set, rdp-tui detects the focused Hyprland monitor's
-physical resolution at each launch. The stable X11 FreeRDP frontend is used even
-under Wayland; experimental native Wayland frontends are deliberately not selected
-automatically. The exact command is recorded in the log.
+The profile form shows **Display scale** as 100% when no scale is saved. Turning
+**Fullscreen** off enables **Smart sizing** so the remote desktop fits the
+window; either advanced setting can still be changed afterward. **Forced
+resolution** is Off by default. When it is Off, rdp-tui detects the focused
+Hyprland monitor's logical work area for a windowed session with dynamic
+resolution, or its physical resolution for smart sizing and SDL fullscreen.
+These settings map to standard FreeRDP options, and the exact command is
+recorded in the log.
 
 The **RDP renderer** advanced setting defaults to **Wayland SDL (experimental)**.
 It starts `sdl-freerdp3` windowed at the detected physical RDP

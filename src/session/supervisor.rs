@@ -10,11 +10,14 @@ use crate::model::{
     ConnectionFailure, ConnectionPlan, FreeRdpClient, HistoryEntry, PreparedConnection, ProfileId,
     Renderer, RouteHandle, SessionId, SessionResult,
 };
+use crate::operations::{self, CredentialSlot};
 use crate::preflight::{PreflightError, prepare_for_session, verify_prepared};
+use crate::profile_store::ProfileStore;
 use crate::runtime::process::{LaunchMode, OwnedChild};
 use crate::runtime::registry::{ChildKind, ProcessIdentity, observe};
 use crate::session::record::{self, SessionRecord, SessionRecordState};
 use crate::ssh::tunnel::terminate;
+use secrecy::{ExposeSecret as _, SecretString};
 use std::io::Read as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -66,6 +69,7 @@ pub fn supervise(
     records_dir: &Path,
     state_dir: &Path,
     preflight_timeout: Duration,
+    password: Option<SecretString>,
 ) -> Result<SessionResult, SuperviseError> {
     let supervisor =
         observe(std::process::id(), ChildKind::Supervisor, session).map_err(SuperviseError::Io)?;
@@ -81,6 +85,7 @@ pub fn supervise(
         state_dir,
         preflight_timeout,
         supervisor,
+        password,
     );
     let _ = record::remove(records_dir, session);
     match &outcome {
@@ -123,6 +128,7 @@ fn run_supervised(
     state_dir: &Path,
     preflight_timeout: Duration,
     supervisor: ProcessIdentity,
+    password: Option<SecretString>,
 ) -> Result<SessionResult, SuperviseError> {
     let mut record = SessionRecord {
         session_id: session,
@@ -134,7 +140,11 @@ fn run_supervised(
     };
     record::write(records_dir, &record).map_err(SuperviseError::Io)?;
 
-    let lease = acquire(store, plan.credentials).map_err(SuperviseError::Credential)?;
+    let mut lease = acquire(store, plan.credentials).map_err(SuperviseError::Credential)?;
+    let temporary_password = password.is_some();
+    if let Some(password) = password {
+        lease.main = Some(password);
+    }
     let askpass =
         AskpassLease::prepare(&lease, helper.to_path_buf()).map_err(SuperviseError::Io)?;
 
@@ -167,7 +177,7 @@ fn run_supervised(
         // fullscreen profile. Retry once with the stable X11 client, reusing the
         // already-acquired route and askpass. Gated on the X11 client actually being
         // installed (freerdp.capabilities.x11).
-        let exited_nonzero = matches!(&monitor_outcome, MonitorOutcome::Exited { status, failure: None, established: false, ended_by_user: false } if !status.success());
+        let exited_nonzero = matches!(&monitor_outcome, MonitorOutcome::Exited { status, failure: None, established: false, ended_by_user: false, .. } if !status.success());
         if should_fallback_to_x11(
             prepared.plan.client.renderer,
             prepared.plan.display.fullscreen,
@@ -192,14 +202,31 @@ fn run_supervised(
         record.state = SessionRecordState::Ending;
         record::write(records_dir, &record).map_err(SuperviseError::Io)?;
 
-        result_from_monitor(
+        let password_rejected = matches!(
+            &monitor_outcome,
+            MonitorOutcome::Exited {
+                authentication_rejected: true,
+                ..
+            }
+        );
+        let result = result_from_monitor(
             monitor_outcome,
             &prepared,
             profile_id,
             config_root,
             state_dir,
             started.elapsed(),
-        )
+        )?;
+        if temporary_password
+            && prepared.plan.security.autosave_session_password
+            && result.established
+            && result.failure != Some(ConnectionFailure::Authentication)
+            && !password_rejected
+            && let Some(password) = lease.main.as_ref()
+        {
+            autosave_password(config_root, profile_id, password);
+        }
+        Ok(result)
     })();
 
     let cleanup = if let Some(RouteHandle::SshTunnel(handle)) = &mut prepared.route_handle {
@@ -210,6 +237,29 @@ fn run_supervised(
     match (outcome, cleanup) {
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn autosave_password(config_root: &Path, profile_id: ProfileId, password: &SecretString) {
+    let store = ProfileStore::new(ConfigStore::new(config_root));
+    let result = (|| {
+        let Some(profile) = store.get(profile_id).map_err(|error| error.to_string())? else {
+            return Ok::<(), String>(());
+        };
+        if !profile.security.autosave_session_password || profile.credential.is_some() {
+            return Ok(());
+        }
+        operations::replace_password(
+            &store,
+            config_root,
+            profile,
+            CredentialSlot::Main,
+            password.expose_secret(),
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        crate::diagnostics::log(format_args!("could not autosave session password: {error}"));
     }
 }
 
@@ -227,6 +277,7 @@ fn result_from_monitor(
             failure,
             established,
             ended_by_user,
+            authentication_rejected: _,
         } => {
             let _ = crate::freerdp::certificate::remove_mismatch(state_dir, profile_id);
             (
@@ -295,6 +346,7 @@ enum MonitorOutcome {
         failure: Option<ConnectionFailure>,
         established: bool,
         ended_by_user: bool,
+        authentication_rejected: bool,
     },
     CertificateChanged(String),
 }
@@ -342,7 +394,7 @@ fn monitor(child: &mut OwnedChild, log: &Path) -> std::io::Result<MonitorOutcome
         }
         // GDI initialization happens after capability negotiation in PostConnect.
         established |= String::from_utf8_lossy(&tail).contains("Local framebuffer format");
-        ended_by_user |= String::from_utf8_lossy(&tail).contains("Connection aborted by user");
+        ended_by_user |= user_aborted(&String::from_utf8_lossy(&tail));
         if tail.len() > TAIL_LIMIT {
             tail.drain(..tail.len() - TAIL_LIMIT);
         }
@@ -357,16 +409,23 @@ fn monitor(child: &mut OwnedChild, log: &Path) -> std::io::Result<MonitorOutcome
                 failure = Some(ConnectionFailure::Authentication);
             }
             established |= String::from_utf8_lossy(&tail).contains("Local framebuffer format");
-            ended_by_user |= String::from_utf8_lossy(&tail).contains("Connection aborted by user");
+            ended_by_user |= user_aborted(&String::from_utf8_lossy(&tail));
             return Ok(MonitorOutcome::Exited {
                 status,
                 failure: if status.success() { None } else { failure },
                 established,
                 ended_by_user: ended_by_user && failure.is_none(),
+                authentication_rejected: failure == Some(ConnectionFailure::Authentication),
             });
         }
         std::thread::sleep(POLL);
     }
+}
+
+/// SDL reports a compositor window close as a cancelled connection and may
+/// exit with its generic 131 code, even after the session was established.
+fn user_aborted(output: &str) -> bool {
+    output.contains("Connection aborted by user") || output.contains("ERRCONNECT_CONNECT_CANCELLED")
 }
 
 /// Classify explicit authentication failures, rather than guessing from an exit code.
@@ -408,8 +467,15 @@ fn record_history(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAP_GRACE, Renderer, should_fallback_to_x11};
+    use super::{MAP_GRACE, Renderer, should_fallback_to_x11, user_aborted};
     use std::time::Duration;
+
+    #[test]
+    fn cancelled_connection_is_an_explicit_user_close() {
+        assert!(user_aborted("ERRCONNECT_CONNECT_CANCELLED [0x0002000B]"));
+        assert!(user_aborted("Connection aborted by user"));
+        assert!(!user_aborted("ERRCONNECT_CONNECT_TRANSPORT_FAILED"));
+    }
 
     #[test]
     fn falls_back_when_sdl_fullscreen_fails_before_mapping() {
