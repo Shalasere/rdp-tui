@@ -1,0 +1,37 @@
+# ANSI accents follow your terminal palette; their contrast depends on that palette.
+version = 1
+
+[styles.text]
+fg = "default"
+bg = "default"
+
+[styles.text_muted]
+# Keep secondary text at the terminal's normal contrast on light and dark themes.
+modifiers = []
+
+[styles.title]
+modifiers = ["bold"]
+
+[styles.border_focused]
+fg = "green"
+modifiers = ["bold"]
+
+[styles.selection]
+modifiers = ["reversed"]
+
+[styles.field_focused]
+modifiers = ["reversed", "bold"]
+
+[styles.info]
+fg = "cyan"
+
+[styles.success]
+fg = "green"
+
+[styles.warning]
+fg = "yellow"
+modifiers = ["bold"]
+
+[styles.error]
+fg = "red"
+modifiers = ["bold"]

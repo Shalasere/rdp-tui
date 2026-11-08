@@ -5,6 +5,8 @@ pub mod import;
 pub mod migrate;
 pub mod schema;
 
+pub mod theme;
+
 pub use error::StoreError;
 pub use file::ConfigStore;
 pub use schema::{

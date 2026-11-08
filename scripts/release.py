@@ -80,15 +80,20 @@ def bundle(target, output, tag=None):
         "Hostname lookup uses /etc/hosts and DNS, without glibc NSS plugins.\n"
         "For names requiring an NSS plugin (e.g. nss-mdns), use an IP address\n"
         "or a native source build such as the Arch package recipe.\n"
+        "Optional themes: copy themes/brogrammer.toml to your rdp-tui config\n"
+        "directory as theme.toml, then restart. See docs/THEMES.md.\n"
     )
     files = {
         "rdp-tui": (data, 0o755),
         "LICENSE": ((ROOT / "LICENSE").read_bytes(), 0o644),
         "README.md": ((ROOT / "README.md").read_bytes(), 0o644),
         "docs/RELEASING.md": ((ROOT / "docs/RELEASING.md").read_bytes(), 0o644),
+        "docs/THEMES.md": ((ROOT / "docs/THEMES.md").read_bytes(), 0o644),
         "INSTALL.txt": (instructions.encode(), 0o644),
         "BUILD-INFO.json": ((json.dumps(build_info, indent=2) + "\n").encode(), 0o644),
     }
+    for theme in (ROOT / "themes").glob("*.toml"):
+        files[f"themes/{theme.name}"] = (theme.read_bytes(), 0o644)
     with archive.open("wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=epoch) as compressed:
         with tarfile.open(fileobj=compressed, mode="w") as tar:
             for name, (content, mode) in sorted(files.items()):

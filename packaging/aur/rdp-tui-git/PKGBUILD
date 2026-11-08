@@ -48,4 +48,6 @@ package() {
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 docs/RELEASING.md "$pkgdir/usr/share/doc/$pkgname/docs/RELEASING.md"
+  install -Dm644 docs/THEMES.md "$pkgdir/usr/share/doc/$pkgname/docs/THEMES.md"
+  install -Dm644 themes/*.toml -t "$pkgdir/usr/share/rdp-tui/themes/"
 }

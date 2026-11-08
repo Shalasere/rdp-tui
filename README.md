@@ -63,6 +63,23 @@ Press `c` to clone the selected profile (then adjust it before saving), or `f` t
 
 Leave **Domain** empty for a local account; rdp-tui passes that as an explicit empty domain so FreeRDP does not request one. The **Password storage** row defaults to **Automatic**, like Remmina: it uses a currently running Secret Service keyring when available and otherwise chooses the encrypted file. It does not start a keyring just to check. Select **Saved password** to store or replace a password. The fallback is encrypted in `~/.config/rdp-tui/secrets.json`, with its owner-only key held in `~/.config/rdp-tui/.password-key`; neither is committed or shared.
 
+## Rust TUI themes
+
+The Rust interface reads `theme.toml` from `$XDG_CONFIG_HOME/rdp-tui/` (normally
+`~/.config/rdp-tui/`). Colors and styles are editable TOML data; adding a theme
+does not require rebuilding. Without a theme file, the interface keeps its
+monochrome appearance.
+
+To use the Brogrammer example from this checkout:
+
+```sh
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/rdp-tui"
+cp -i themes/brogrammer.toml "${XDG_CONFIG_HOME:-$HOME/.config}/rdp-tui/theme.toml"
+```
+
+Restart `rdp-tui tui` after editing. See [theme configuration](docs/THEMES.md)
+for the available roles, palette references, terminal colors, and recovery.
+
 ## Development
 
 Both the legacy Python frontend and the Rust rewrite remain tested. New core

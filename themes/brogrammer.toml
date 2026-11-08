@@ -1,0 +1,54 @@
+# Copy to your rdp-tui configuration directory as theme.toml and restart.
+# Explicit RGB colors avoid unexpected remapping of terminal ANSI entries.
+version = 1
+
+[palette]
+background = "#131313"
+foreground = "#d6dae4"
+muted = "#b9b9b9"
+green = "#2cc55d"
+yellow = "#ecb90f"
+# Slightly lifted from Brogrammer #f71118 to meet 4.5:1 on #131313.
+red = "#f91118"
+blue = "#2a84d2"
+
+[styles.text]
+fg = "$foreground"
+bg = "$background"
+
+[styles.text_muted]
+fg = "$muted"
+
+[styles.title]
+modifiers = ["bold"]
+
+[styles.border]
+fg = "$muted"
+
+[styles.border_focused]
+fg = "$green"
+modifiers = ["bold"]
+
+[styles.selection]
+fg = "$background"
+bg = "$foreground"
+modifiers = []
+
+[styles.field_focused]
+fg = "$background"
+bg = "$foreground"
+modifiers = ["bold"]
+
+[styles.info]
+fg = "$blue"
+
+[styles.success]
+fg = "$green"
+
+[styles.warning]
+fg = "$yellow"
+modifiers = ["bold"]
+
+[styles.error]
+fg = "$red"
+modifiers = ["bold"]

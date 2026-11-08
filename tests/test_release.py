@@ -1,9 +1,11 @@
 import hashlib
 import struct
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 if sys.version_info >= (3, 11):
     from scripts import release
@@ -52,3 +54,37 @@ class ReleaseTests(unittest.TestCase):
             (directory / "rdp-tui-unexpected.tar.gz").write_bytes(b"wrong release")
             with self.assertRaises(ValueError):
                 release.checksums(directory, require_all=True)
+
+    def test_release_archive_contains_editable_themes_and_their_documentation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "target/x86_64-unknown-linux-musl/release/rdp-tui"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(self.elf())
+            for name in ["LICENSE", "README.md", "docs/RELEASING.md", "docs/THEMES.md"]:
+                destination = root / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(name)
+            themes = root / "themes"
+            themes.mkdir()
+            for source in (release.ROOT / "themes").glob("*.toml"):
+                (themes / source.name).write_bytes(source.read_bytes())
+            self.assertEqual(len(list(themes.glob("*.toml"))), 3)
+            output = root / "dist"
+            with (
+                patch.object(release, "ROOT", root),
+                patch.object(release, "version", return_value="1.0.0"),
+                patch.object(release, "git_output", side_effect=["commit", "1000"]),
+                patch.object(
+                    release.subprocess,
+                    "check_output",
+                    side_effect=["rdp-tui Rust frontend", "rustc test"],
+                ),
+            ):
+                release.bundle("x86_64-unknown-linux-musl", output)
+            with tarfile.open(next(output.glob("*.tar.gz"))) as archive:
+                prefix = "rdp-tui-1.0.0-x86_64-unknown-linux-musl"
+                for source in themes.glob("*.toml"):
+                    member = archive.extractfile(f"{prefix}/themes/{source.name}")
+                    self.assertEqual(member.read(), source.read_bytes())
+                self.assertIsNotNone(archive.getmember(f"{prefix}/docs/THEMES.md"))

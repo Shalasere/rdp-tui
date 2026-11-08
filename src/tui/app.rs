@@ -6,6 +6,7 @@
 //! forbidden, so nothing is imported from `cli`).
 
 use super::terminal::TerminalGuard;
+use super::theme::Theme;
 mod view;
 use crate::config::ConfigStore;
 use crate::credentials::SystemCredentialStore;
@@ -46,6 +47,7 @@ pub fn run(config_root: &Path) -> io::Result<()> {
     let mut app = App::new(profiles, executable, config_root.to_path_buf());
     app.load_message_history(&state_dir());
     app.watch_existing_sessions();
+    app.load_theme();
 
     let mut guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -136,8 +138,18 @@ struct WatchedSession {
     initiated_here: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Severity {
+    #[default]
+    Neutral,
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
 enum BackgroundResult {
-    Status(String),
+    Status(Severity, String),
     Error(String),
 }
 
@@ -478,6 +490,9 @@ struct App {
     filter: String,
     selected: ListState,
     status: String,
+    status_severity: Severity,
+    theme: Theme,
+    theme_warning: Option<TextView>,
     executable: PathBuf,
     config_root: PathBuf,
     mode: Mode,
@@ -502,6 +517,9 @@ impl App {
             filter: String::new(),
             selected: ListState::default(),
             status: String::new(),
+            status_severity: Severity::Neutral,
+            theme: Theme::default(),
+            theme_warning: None,
             executable,
             config_root,
             mode: Mode::Browsing,
@@ -517,8 +535,43 @@ impl App {
             notification_pending: false,
         };
         app.recompute_visible();
-        app.status = app.describe_current();
+        app.set_status(Severity::Neutral, app.describe_current());
         app
+    }
+
+    fn set_status(&mut self, severity: Severity, message: String) {
+        self.status = message;
+        self.status_severity = severity;
+    }
+
+    fn load_theme(&mut self) {
+        let (theme, warning) = Theme::load(&self.config_root);
+        self.theme = theme;
+        self.theme_warning =
+            warning.map(|message| TextView::new("Theme configuration warning", message));
+    }
+
+    /// Match modal input priority to rendering: operation errors above theme warnings.
+    fn handle_modal_key(&mut self, key: KeyEvent) -> bool {
+        if self.error_dialog.is_some() {
+            self.handle_error_dialog(key);
+            true
+        } else if self.theme_warning.is_some() && matches!(self.mode, Mode::Browsing) {
+            self.handle_theme_warning(key);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn handle_theme_warning(&mut self, key: KeyEvent) {
+        if self
+            .theme_warning
+            .as_mut()
+            .is_some_and(|warning| warning.handle_key(key))
+        {
+            self.theme_warning = None;
+        }
     }
 
     fn store(&self) -> ProfileStore {
@@ -588,8 +641,7 @@ impl App {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            if self.error_dialog.is_some() {
-                self.handle_error_dialog(key);
+            if self.handle_modal_key(key) {
                 continue;
             }
             match &self.mode {
@@ -611,7 +663,7 @@ impl App {
         while let Ok(result) = self.background_rx.try_recv() {
             self.background_busy = false;
             match result {
-                BackgroundResult::Status(status) => self.status = status,
+                BackgroundResult::Status(severity, status) => self.set_status(severity, status),
                 BackgroundResult::Error(message) => self.queue_error(message),
             }
         }
@@ -650,10 +702,13 @@ impl App {
                     self.present_error(message);
                 } else {
                     self.notification_pending = true;
-                    self.status = format!("{name}: session ended with an error.");
+                    self.set_status(
+                        Severity::Error,
+                        format!("{name}: session ended with an error."),
+                    );
                 }
             } else {
-                self.status = format!("{name}: session closed.");
+                self.set_status(Severity::Neutral, format!("{name}: session closed."));
             }
         }
     }
@@ -662,7 +717,10 @@ impl App {
         let store = ConfigStore::new(state_root);
         match store.load_messages() {
             Ok(messages) => self.messages = messages,
-            Err(error) => self.status = format!("Could not read message history: {error}"),
+            Err(error) => self.set_status(
+                Severity::Warning,
+                format!("Could not read message history: {error}"),
+            ),
         }
         self.message_store = Some(store);
     }
@@ -713,14 +771,12 @@ impl App {
         self.present_error(message);
     }
 
-    fn error_status(&mut self, message: String) -> String {
-        self.queue_error(message);
-        self.status.clone()
-    }
-
     fn present_error(&mut self, message: String) {
         self.pending_errors.push_back(message);
-        self.status = "Action failed — details pending.".to_string();
+        self.set_status(
+            Severity::Error,
+            "Action failed — details pending.".to_string(),
+        );
         self.present_pending_error();
     }
 
@@ -731,7 +787,7 @@ impl App {
             && let Some(message) = self.pending_errors.pop_front()
         {
             self.error_dialog = Some(TextView::new("Error", message));
-            self.status = "Action failed — see dialog.".to_string();
+            self.set_status(Severity::Error, "Action failed — see dialog.".to_string());
         }
     }
 
@@ -742,7 +798,7 @@ impl App {
             .is_some_and(|dialog| dialog.handle_key(key))
         {
             self.error_dialog = None;
-            self.status = self.describe_current();
+            self.set_status(Severity::Neutral, self.describe_current());
             self.present_pending_error();
         }
     }
@@ -752,7 +808,7 @@ impl App {
             && details.handle_key(key)
         {
             self.mode = Mode::Browsing;
-            self.status = self.describe_current();
+            self.set_status(Severity::Neutral, self.describe_current());
         }
     }
 
@@ -838,7 +894,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Browsing;
-                self.status = "Password entry cancelled.".into();
+                self.set_status(Severity::Neutral, "Password entry cancelled.".into());
             }
             KeyCode::Enter => self.commit_password(),
             KeyCode::Backspace => {
@@ -859,7 +915,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Browsing;
-                self.status = "Cancelled.".into();
+                self.set_status(Severity::Neutral, "Cancelled.".into());
             }
             KeyCode::Enter => self.commit_prompt(),
             KeyCode::Backspace => {
@@ -886,11 +942,14 @@ impl App {
             PromptAction::Find => {
                 self.filter = input.trim().to_string();
                 self.recompute_visible();
-                self.status = if self.filter.is_empty() {
-                    self.describe_current()
-                } else {
-                    format!("Filter: {} ({} shown)", self.filter, self.visible.len())
-                };
+                self.set_status(
+                    Severity::Neutral,
+                    if self.filter.is_empty() {
+                        self.describe_current()
+                    } else {
+                        format!("Filter: {} ({} shown)", self.filter, self.visible.len())
+                    },
+                );
             }
             PromptAction::ConfirmDelete(id) => {
                 self.perform_delete(id, input.trim().eq_ignore_ascii_case("yes"));
@@ -901,7 +960,7 @@ impl App {
                         self.run_deep_test(profile, true);
                     }
                 } else {
-                    self.status = "Deep-test cancelled.".into();
+                    self.set_status(Severity::Neutral, "Deep-test cancelled.".into());
                 }
             }
             PromptAction::Import => self.perform_import(input.trim()),
@@ -942,7 +1001,7 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.mode = Mode::Browsing;
-                self.status = "Edit cancelled.".into();
+                self.set_status(Severity::Neutral, "Edit cancelled.".into());
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Mode::Editing(form) = &mut self.mode {
@@ -1000,11 +1059,14 @@ impl App {
                 self.mode = Mode::Browsing;
                 self.reload();
                 self.select_id(id);
-                self.status = if adding {
-                    format!("Added {name}")
-                } else {
-                    format!("Saved {name}")
-                };
+                self.set_status(
+                    Severity::Success,
+                    if adding {
+                        format!("Added {name}")
+                    } else {
+                        format!("Saved {name}")
+                    },
+                );
             }
             // The store validates on write (e.g. an impossible multimon+span
             // combination); surface that under the still-open form.
@@ -1030,7 +1092,7 @@ impl App {
             (current + count - 1) % count
         };
         self.selected.select(Some(next));
-        self.status = self.describe_current();
+        self.set_status(Severity::Neutral, self.describe_current());
     }
 
     fn current_index(&self) -> Option<usize> {
@@ -1065,17 +1127,23 @@ impl App {
 
     fn begin_add(&mut self) {
         self.mode = Mode::Editing(Box::new(EditForm::blank()));
-        self.status = "Adding a profile — A to accept, Esc to cancel.".into();
+        self.set_status(
+            Severity::Info,
+            "Adding a profile — A to accept, Esc to cancel.".into(),
+        );
     }
 
     fn begin_edit(&mut self) {
         let Some(profile) = self.current() else {
-            self.status = "No profile to edit.".into();
+            self.set_status(Severity::Warning, "No profile to edit.".into());
             return;
         };
         let name = profile.name.clone();
         self.mode = Mode::Editing(Box::new(EditForm::from_profile(profile)));
-        self.status = format!("Editing {name} — A to accept, Esc to cancel.");
+        self.set_status(
+            Severity::Info,
+            format!("Editing {name} — A to accept, Esc to cancel."),
+        );
     }
 
     fn clone_current(&mut self) {
@@ -1093,7 +1161,7 @@ impl App {
             Ok(()) => {
                 self.reload();
                 self.select_id(id);
-                self.status = format!("Cloned to {name}");
+                self.set_status(Severity::Success, format!("Cloned to {name}"));
             }
             Err(error) => self.queue_error(format!("Could not clone: {error}")),
         }
@@ -1112,7 +1180,7 @@ impl App {
 
     fn perform_delete(&mut self, id: ProfileId, confirmed: bool) {
         if !confirmed {
-            self.status = "Delete cancelled.".into();
+            self.set_status(Severity::Neutral, "Delete cancelled.".into());
             return;
         }
         let removed = self
@@ -1130,7 +1198,7 @@ impl App {
         match result {
             Ok(_) => {
                 self.reload();
-                self.status = format!("Deleted {name}");
+                self.set_status(Severity::Success, format!("Deleted {name}"));
             }
             Err(error) => self.queue_error(format!("Could not delete: {error}")),
         }
@@ -1154,15 +1222,18 @@ impl App {
 
     fn perform_import(&mut self, path: &str) {
         if path.is_empty() {
-            self.status = "Import cancelled.".into();
+            self.set_status(Severity::Neutral, "Import cancelled.".into());
             return;
         }
         match operations::import_profiles(&self.store(), Path::new(path)) {
             Ok(counts) => {
                 self.reload();
-                self.status = format!(
-                    "Imported {}, updated {}, skipped {}, failed {}",
-                    counts.added, counts.updated, counts.skipped, counts.failed
+                self.set_status(
+                    Severity::Success,
+                    format!(
+                        "Imported {}, updated {}, skipped {}, failed {}",
+                        counts.added, counts.updated, counts.skipped, counts.failed
+                    ),
                 );
                 if counts.failed > 0 {
                     self.queue_error(self.status.clone());
@@ -1174,7 +1245,7 @@ impl App {
 
     fn begin_export(&mut self) {
         let Some(profile) = self.current() else {
-            self.status = "No profile to export.".into();
+            self.set_status(Severity::Warning, "No profile to export.".into());
             return;
         };
         self.mode = Mode::Prompt {
@@ -1186,11 +1257,11 @@ impl App {
 
     fn perform_export(&mut self, id: ProfileId, path: &str) {
         if path.is_empty() {
-            self.status = "Export cancelled.".into();
+            self.set_status(Severity::Neutral, "Export cancelled.".into());
             return;
         }
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
-            self.status = "Profile is no longer available.".into();
+            self.set_status(Severity::Warning, "Profile is no longer available.".into());
             return;
         };
         let name = profile.name.clone();
@@ -1199,10 +1270,13 @@ impl App {
         if destination.extension().and_then(std::ffi::OsStr::to_str) != Some("rdp") {
             destination.set_extension("rdp");
         }
-        self.status = match std::fs::write(&destination, contents) {
-            Ok(()) => format!("Exported {name} to {} (no password)", destination.display()),
-            Err(error) => self.error_status(format!("Export failed: {error}")),
-        };
+        match std::fs::write(&destination, contents) {
+            Ok(()) => self.set_status(
+                Severity::Success,
+                format!("Exported {name} to {} (no password)", destination.display()),
+            ),
+            Err(error) => self.queue_error(format!("Export failed: {error}")),
+        }
     }
 
     fn begin_status(&mut self) {
@@ -1275,14 +1349,20 @@ impl App {
     fn toggle_diagnostics(&mut self) {
         if let Some(path) = crate::diagnostics::path() {
             crate::diagnostics::disable();
-            self.status = format!("Diagnostics disabled (log retained at {})", path.display());
+            self.set_status(
+                Severity::Info,
+                format!("Diagnostics disabled (log retained at {})", path.display()),
+            );
             return;
         }
         let path = state_dir().join("diagnostics.log");
-        self.status = match crate::diagnostics::enable(path.clone()) {
-            Ok(()) => format!("Diagnostics enabled: {}", path.display()),
-            Err(error) => self.error_status(format!("Could not enable diagnostics: {error}")),
-        };
+        match crate::diagnostics::enable(path.clone()) {
+            Ok(()) => self.set_status(
+                Severity::Success,
+                format!("Diagnostics enabled: {}", path.display()),
+            ),
+            Err(error) => self.queue_error(format!("Could not enable diagnostics: {error}")),
+        }
     }
 
     fn begin_history(&mut self) {
@@ -1351,7 +1431,10 @@ impl App {
                     name: profile.name.clone(),
                     initiated_here: true,
                 });
-                self.status = format!("Starting session {session} for {}…", profile.name);
+                self.set_status(
+                    Severity::Info,
+                    format!("Starting session {session} for {}…", profile.name),
+                );
             }
             Err(error) => self.queue_error(format!("{}: Connect failed: {error}", profile.name)),
         }
@@ -1362,15 +1445,21 @@ impl App {
             return;
         };
         if self.background_busy {
-            self.status = "A connection check is already running.".into();
+            self.set_status(
+                Severity::Info,
+                "A connection check is already running.".into(),
+            );
             return;
         }
         self.background_busy = true;
-        self.status = format!("Testing {}…", profile.name);
+        self.set_status(Severity::Info, format!("Testing {}…", profile.name));
         let sender = self.background_tx.clone();
         std::thread::spawn(move || {
             let status = match test_profile(&profile, TEST_TIMEOUT) {
-                Ok(()) => BackgroundResult::Status(format!("{} is reachable", profile.name)),
+                Ok(()) => BackgroundResult::Status(
+                    Severity::Success,
+                    format!("{} is reachable", profile.name),
+                ),
                 Err(error) => BackgroundResult::Error(format!("{}: {error}", profile.name)),
             };
             let _ = sender.send(status);
@@ -1394,11 +1483,14 @@ impl App {
 
     fn run_deep_test(&mut self, profile: Profile, acknowledged: bool) {
         if self.background_busy {
-            self.status = "A connection check is already running.".into();
+            self.set_status(
+                Severity::Info,
+                "A connection check is already running.".into(),
+            );
             return;
         }
         self.background_busy = true;
-        self.status = format!("Deep-testing {}…", profile.name);
+        self.set_status(Severity::Info, format!("Deep-testing {}…", profile.name));
         let sender = self.background_tx.clone();
         let config_root = self.config_root.clone();
         let state_root = state_dir();
@@ -1418,7 +1510,12 @@ impl App {
                             | crate::session::DeepTest::RateLimited
                             | crate::session::DeepTest::NeedsAcknowledgement
                     ) {
-                        BackgroundResult::Status(message)
+                        let severity = if outcome == crate::session::DeepTest::Authenticated {
+                            Severity::Success
+                        } else {
+                            Severity::Warning
+                        };
+                        BackgroundResult::Status(severity, message)
                     } else {
                         BackgroundResult::Error(message)
                     }
@@ -1436,7 +1533,10 @@ impl App {
             return;
         };
         if slot == CredentialSlot::Gateway && !matches!(profile.route, Route::RdGateway { .. }) {
-            self.status = "Set this profile's route to an RD Gateway first.".into();
+            self.set_status(
+                Severity::Warning,
+                "Set this profile's route to an RD Gateway first.".into(),
+            );
             return;
         }
         let name = profile.name.clone();
@@ -1449,8 +1549,10 @@ impl App {
         } else {
             "Gateway password"
         };
-        self.status =
-            format!("{label} for {name} — Enter to save, empty Enter to clear, Esc to cancel");
+        self.set_status(
+            Severity::Info,
+            format!("{label} for {name} — Enter to save, empty Enter to clear, Esc to cancel"),
+        );
     }
 
     fn commit_password(&mut self) {
@@ -1465,17 +1567,22 @@ impl App {
         let name = self.profiles[index].name.clone();
         if password.is_empty() {
             // Empty = clear any saved password (parity with `credential clear`).
-            self.status = match self.clear_password(index, slot) {
-                Ok(true) => format!("Cleared the password for {name}"),
-                Ok(false) => format!("{name} had no saved password"),
-                Err(error) => self.error_status(format!("Could not clear password: {error}")),
-            };
+            match self.clear_password(index, slot) {
+                Ok(true) => self.set_status(
+                    Severity::Success,
+                    format!("Cleared the password for {name}"),
+                ),
+                Ok(false) => {
+                    self.set_status(Severity::Neutral, format!("{name} had no saved password"));
+                }
+                Err(error) => self.queue_error(format!("Could not clear password: {error}")),
+            }
             return;
         }
-        self.status = match self.save_password(index, slot, &password) {
-            Ok(()) => format!("Saved a password for {name}"),
-            Err(error) => self.error_status(format!("Could not save password: {error}")),
-        };
+        match self.save_password(index, slot, &password) {
+            Ok(()) => self.set_status(Severity::Success, format!("Saved a password for {name}")),
+            Err(error) => self.queue_error(format!("Could not save password: {error}")),
+        }
     }
 
     fn clear_password(&mut self, index: usize, slot: CredentialSlot) -> Result<bool, String> {
@@ -1513,7 +1620,10 @@ impl App {
         };
         match crate::freerdp::certificate::read_mismatch(&state_dir(), profile.id) {
             Ok(Some(mismatch)) => self.mode = Mode::CertificateMismatch(mismatch),
-            Ok(None) => self.status = "No changed certificate is awaiting confirmation.".into(),
+            Ok(None) => self.set_status(
+                Severity::Neutral,
+                "No changed certificate is awaiting confirmation.".into(),
+            ),
             Err(error) => self.queue_error(format!("Could not read certificate status: {error}")),
         }
     }
@@ -1533,26 +1643,32 @@ impl App {
                     .cloned()
                 else {
                     self.mode = Mode::Browsing;
-                    self.status = "The profile no longer exists.".into();
+                    self.set_status(Severity::Warning, "The profile no longer exists.".into());
                     return;
                 };
                 self.mode = Mode::Browsing;
-                self.status = match operations::trust_certificate_mismatch(
+                match operations::trust_certificate_mismatch(
                     &self.store(),
                     self.config_root.as_path(),
                     &state_dir(),
                     profile,
                     &fingerprint,
                 ) {
-                    Ok(_) => "Certificate approved; reconnect to pin the replacement.".into(),
+                    Ok(_) => self.set_status(
+                        Severity::Success,
+                        "Certificate approved; reconnect to pin the replacement.".into(),
+                    ),
                     Err(error) => {
-                        self.error_status(format!("Could not approve certificate: {error}"))
+                        self.queue_error(format!("Could not approve certificate: {error}"));
                     }
-                };
+                }
             }
             KeyCode::Char('q' | 'Q') | KeyCode::Esc => {
                 self.mode = Mode::Browsing;
-                self.status = "Certificate change left untrusted.".into();
+                self.set_status(
+                    Severity::Warning,
+                    "Certificate change left untrusted.".into(),
+                );
             }
             _ => {}
         }
@@ -1593,6 +1709,7 @@ fn profile_matches(profile: &Profile, query: &str) -> bool {
 mod tests {
     use super::{
         App, BackgroundResult, CredentialSlot, EditForm, FIELDS, Field, Mode, PromptAction,
+        Severity, TextView,
     };
     use crate::config::ConfigStore;
     use crate::model::{
@@ -1649,6 +1766,80 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect()
+    }
+
+    #[test]
+    fn theme_failure_warns_without_polluting_error_history_or_changing_the_file() {
+        let (dir, mut app) = app_on_disk(&["Anima"]);
+        let path = dir.path().join("theme.toml");
+        let invalid = "version = 1\n[styles.selection]\nfg = \"not-a-color\"\n";
+        std::fs::write(&path, invalid).unwrap();
+        app.load_theme();
+        let warning = app.theme_warning.as_ref().unwrap();
+        assert_eq!(warning.title, "Theme configuration warning");
+        assert!(warning.message.contains("theme.toml"));
+        assert!(app.pending_errors.is_empty());
+        assert!(app.error_dialog.is_none());
+        assert!(app.messages.is_empty());
+        assert!(!app.notification_pending);
+        assert_eq!(app.status_severity, Severity::Neutral);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), invalid);
+        assert!(rendered(&mut app, 80, 24).contains("Theme configuration warning"));
+        assert!(app.handle_modal_key(press(KeyCode::Esc)));
+        assert!(app.theme_warning.is_none());
+        assert!(!app.handle_modal_key(press(KeyCode::Esc)));
+        assert!(matches!(app.mode, Mode::Browsing));
+    }
+
+    #[test]
+    fn theme_warning_waits_for_password_entry_and_errors_have_modal_priority() {
+        let mut app = app_with(&["Anima"]);
+        app.theme_warning = Some(TextView::new(
+            "Theme configuration warning",
+            "Invalid theme".into(),
+        ));
+        app.begin_password(CredentialSlot::Main);
+        assert!(!app.handle_modal_key(press(KeyCode::Char('x'))));
+        app.handle_password(press(KeyCode::Char('x')));
+        assert!(!rendered(&mut app, 80, 24).contains("Invalid theme"));
+        app.handle_password(press(KeyCode::Esc));
+        app.queue_error("Operation failed".into());
+        assert!(app.handle_modal_key(press(KeyCode::Enter)));
+        assert!(app.error_dialog.is_none());
+        assert!(app.theme_warning.is_some());
+        assert!(app.handle_modal_key(press(KeyCode::Enter)));
+        assert!(app.theme_warning.is_none());
+    }
+
+    #[test]
+    fn typed_background_status_preserves_severity_and_cancellation_resets_it() {
+        let mut app = app_with(&["Anima"]);
+        // Words do not decide colors: severity comes from the result's producer.
+        app.background_tx
+            .send(BackgroundResult::Status(
+                Severity::Warning,
+                "Check was skipped".into(),
+            ))
+            .unwrap();
+        app.receive_background_result();
+        assert_eq!(app.status_severity, Severity::Warning);
+        assert!(app.error_dialog.is_none());
+        app.background_tx
+            .send(BackgroundResult::Status(
+                Severity::Success,
+                "No error occurred".into(),
+            ))
+            .unwrap();
+        app.receive_background_result();
+        assert_eq!(app.status_severity, Severity::Success);
+        app.begin_password(CredentialSlot::Main);
+        assert_eq!(app.status_severity, Severity::Info);
+        app.handle_password(press(KeyCode::Esc));
+        assert_eq!(app.status_severity, Severity::Neutral);
+        app.queue_error("Failed check".into());
+        assert_eq!(app.status_severity, Severity::Error);
+        app.handle_error_dialog(press(KeyCode::Esc));
+        assert_eq!(app.status_severity, Severity::Neutral);
     }
 
     #[test]
@@ -1758,10 +1949,14 @@ mod tests {
     fn failed_connection_checks_open_the_dialog_while_success_stays_in_the_footer() {
         let mut app = app_with(&["Anima"]);
         app.background_tx
-            .send(BackgroundResult::Status("Anima is reachable".to_string()))
+            .send(BackgroundResult::Status(
+                Severity::Success,
+                "Anima is reachable".to_string(),
+            ))
             .unwrap();
         app.receive_background_result();
         assert_eq!(app.status, "Anima is reachable");
+        assert_eq!(app.status_severity, Severity::Success);
         assert!(app.error_dialog.is_none());
         app.background_tx
             .send(BackgroundResult::Error(
