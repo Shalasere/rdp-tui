@@ -114,10 +114,19 @@ fn command_renders_supported_profile_settings() {
         .map(|arg| arg.to_string_lossy())
         .collect::<Vec<_>>();
 
+    let microphone = args
+        .iter()
+        .find(|arg| arg.starts_with("/microphone"))
+        .expect("microphone redirection argument");
+    assert_eq!(
+        microphone, "/microphone",
+        "microphone must use system defaults and server negotiation, not pinned options"
+    );
+
     for expected in [
         "/auth-pkg-list:none,ntlm",
         "/sound",
-        "/microphone:sys:pulse,format:1,rate:48000,channel:1",
+        "/microphone",
         "/drive:rdp-tui-1,/srv/shared",
         "/admin",
         "/span",

@@ -4,8 +4,6 @@ use crate::model::{
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-const STABLE_MICROPHONE_REDIRECTION: &str = "/microphone:sys:pulse,format:1,rate:48000,channel:1";
-
 /// Build `FreeRDP` argv only; credentials are deliberately not rendered into argv.
 #[must_use]
 pub fn build_command(
@@ -33,9 +31,13 @@ pub fn build_command(
         args.push("/sound".into());
     }
     if plan.devices.microphone {
-        // Use the Pulse/PipeWire default source selected by the desktop, while
-        // avoiding FreeRDP's unstable AAC input path observed during teardown.
-        args.push(STABLE_MICROPHONE_REDIRECTION.into());
+        // Pin nothing: FreeRDP picks its default audio backend, capture follows
+        // the system default source, and the codec, rate and channel count are
+        // negotiated with the server. FreeRDP only offers the server formats
+        // matching every pinned field, so a pinned 48 kHz mono PCM once left
+        // zero formats against Windows (which offers 44.1 kHz stereo PCM) and
+        // the remote microphone never opened.
+        args.push("/microphone".into());
     }
     if plan.devices.printers {
         args.push("/printer".into());

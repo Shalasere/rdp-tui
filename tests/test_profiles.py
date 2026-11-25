@@ -245,7 +245,7 @@ class ProfileTests(unittest.TestCase):
             "+dynamic-resolution",
             "/smart-sizing",
             "/scale:140",
-            "/microphone:sys:pulse,format:1,rate:48000,channel:1",
+            "/microphone",
             "+auto-reconnect",
             "/network:lan",
             "/bpp:32",
